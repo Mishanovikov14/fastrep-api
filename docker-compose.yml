@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: fastrep-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fastrep
+      POSTGRES_PASSWORD: fastrep_password
+      POSTGRES_DB: fastrep
+    ports:
+      - "5432:5432"
+    volumes:
+      - fastrep_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  fastrep_postgres_data:
