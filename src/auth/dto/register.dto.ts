@@ -1,12 +1,19 @@
 import { Transform, TransformFnParams } from 'class-transformer';
 import {
   IsEmail,
-  IsLocale,
+  IsEnum,
   IsNotEmpty,
+  IsOptional,
   IsString,
   MaxLength,
   MinLength,
 } from 'class-validator';
+
+export enum SupportedLanguage {
+  EN = 'en',
+  UK = 'uk',
+  RU = 'ru',
+}
 
 export class RegisterDto {
   @Transform(({ value }: TransformFnParams): unknown =>
@@ -30,8 +37,8 @@ export class RegisterDto {
   @Transform(({ value }: TransformFnParams): unknown =>
     typeof value === 'string' ? value.trim() : value,
   )
+  @IsOptional()
   @IsString()
-  @IsLocale()
-  @MaxLength(35)
-  language!: string;
+  @IsEnum(SupportedLanguage)
+  language?: SupportedLanguage;
 }

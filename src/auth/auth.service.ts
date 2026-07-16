@@ -1,13 +1,13 @@
 import {
   ConflictException,
   Injectable,
-  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as argon2 from 'argon2';
 import { randomUUID } from 'node:crypto';
+import { normalizeEmail } from '../common/utils/normalize-email';
 import { PrismaService } from '../prisma/prisma.service';
 import { PublicUser } from '../users/user-select';
 import { UsersService } from '../users/users.service';
@@ -16,8 +16,9 @@ import {
   RefreshTokenPayload,
   TokenPair,
 } from './auth.types';
+import { JWT_AUDIENCE, JWT_ISSUER } from './auth.constants';
 import { LoginDto } from './dto/login.dto';
-import { RegisterDto } from './dto/register.dto';
+import { RegisterDto, SupportedLanguage } from './dto/register.dto';
 
 const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
 const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
@@ -32,7 +33,7 @@ export class AuthService {
   ) {}
 
   async register(dto: RegisterDto): Promise<AuthenticationResult> {
-    const email = this.normalizeEmail(dto.email);
+    const email = normalizeEmail(dto.email);
     const existingUser = await this.usersService.findByEmail(email);
 
     if (existingUser) {
@@ -46,7 +47,7 @@ export class AuthService {
       fullName: dto.fullName,
       email,
       passwordHash,
-      language: dto.language,
+      language: dto.language ?? SupportedLanguage.EN,
     });
     const tokens = await this.createTokenPair(user.id);
 
@@ -54,9 +55,7 @@ export class AuthService {
   }
 
   async login(dto: LoginDto): Promise<AuthenticationResult> {
-    const user = await this.usersService.findByEmail(
-      this.normalizeEmail(dto.email),
-    );
+    const user = await this.usersService.findByEmail(normalizeEmail(dto.email));
     const passwordIsValid = user
       ? await this.verifyHash(user.passwordHash, dto.password)
       : false;
@@ -118,8 +117,11 @@ export class AuthService {
       where: { id: payload.jti },
     });
 
+    if (!storedToken) {
+      return;
+    }
+
     if (
-      !storedToken ||
       storedToken.userId !== payload.sub ||
       !(await this.verifyHash(storedToken.tokenHash, refreshToken))
     ) {
@@ -162,6 +164,8 @@ export class AuthService {
         {
           secret: this.configService.getOrThrow<string>('JWT_ACCESS_SECRET'),
           expiresIn: ACCESS_TOKEN_TTL_SECONDS,
+          issuer: JWT_ISSUER,
+          audience: JWT_AUDIENCE,
         },
       ),
       this.jwtService.signAsync(
@@ -169,6 +173,8 @@ export class AuthService {
         {
           secret: this.configService.getOrThrow<string>('JWT_REFRESH_SECRET'),
           expiresIn: REFRESH_TOKEN_TTL_SECONDS,
+          issuer: JWT_ISSUER,
+          audience: JWT_AUDIENCE,
         },
       ),
     ]);
@@ -184,6 +190,8 @@ export class AuthService {
         refreshToken,
         {
           secret: this.configService.getOrThrow<string>('JWT_REFRESH_SECRET'),
+          issuer: JWT_ISSUER,
+          audience: JWT_AUDIENCE,
         },
       );
 
@@ -205,14 +213,10 @@ export class AuthService {
     const user = await this.usersService.findById(userId);
 
     if (!user) {
-      throw new NotFoundException('User not found');
+      throw new UnauthorizedException('Invalid session');
     }
 
     return user;
-  }
-
-  private normalizeEmail(email: string): string {
-    return email.trim().toLowerCase();
   }
 
   private hashRefreshToken(refreshToken: string): Promise<string> {
