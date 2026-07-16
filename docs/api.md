@@ -2,6 +2,12 @@
 
 The current API exposes authentication endpoints only. Request and response bodies use JSON.
 
+Swagger is exposed only when `SWAGGER_ENABLED=true`.
+
+Swagger UI: http://localhost:3000/api/docs
+
+OpenAPI JSON: http://localhost:3000/api/docs-json
+
 Protected endpoints require an access token:
 
 ```http

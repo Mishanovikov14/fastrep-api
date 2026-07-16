@@ -63,8 +63,17 @@ The API listens on `http://localhost:3000` by default. The Docker Compose servic
 | `JWT_ACCESS_SECRET`  | Yes      | Secret used to sign and verify access tokens. Use a long random value.                     |
 | `JWT_REFRESH_SECRET` | Yes      | Separate secret used to sign and verify refresh tokens. Use a different long random value. |
 | `PORT`               | No       | HTTP port. Defaults to `3000`.                                                             |
+| `SWAGGER_ENABLED`    | No       | Exposes Swagger only when set to `true`.                                                   |
 
 Copy [.env.example](.env.example) to `.env` and replace the JWT placeholders locally. Never commit `.env` or real secrets.
+
+## Swagger
+
+Swagger is exposed only when `SWAGGER_ENABLED=true`.
+
+Swagger UI: http://localhost:3000/api/docs
+
+OpenAPI JSON: http://localhost:3000/api/docs-json
 
 ## Database commands
 

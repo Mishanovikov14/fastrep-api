@@ -14,3 +14,4 @@ All notable changes to this project will be documented in this file. The format 
 - JWT access and rotating refresh-token handling.
 - DTO validation for authentication requests.
 - Authentication unit and E2E tests.
+- Environment-controlled Swagger UI and OpenAPI JSON endpoints.
