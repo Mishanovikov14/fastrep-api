@@ -7,6 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Request } from 'express';
+import { JWT_AUDIENCE, JWT_ISSUER } from './auth.constants';
 import { AccessTokenPayload } from './auth.types';
 
 type AuthenticatedRequest = Request & { userId: string };
@@ -31,6 +32,8 @@ export class AccessTokenGuard implements CanActivate {
         token,
         {
           secret: this.configService.getOrThrow<string>('JWT_ACCESS_SECRET'),
+          issuer: JWT_ISSUER,
+          audience: JWT_AUDIENCE,
         },
       );
 
