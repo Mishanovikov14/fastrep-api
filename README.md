@@ -1,98 +1,112 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# FastRep API
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+FastRep API is the NestJS backend for the FastRep mobile application. The current implementation provides user accounts and JWT-based authentication. Report generation, file storage, AI processing, and PDF generation are planned and are not implemented in this repository yet.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Current status
 
-## Description
+The repository currently includes:
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+- a NestJS modular monolith;
+- PostgreSQL running locally through Docker Compose;
+- Prisma schema, migrations, and generated client integration;
+- `User` and `RefreshToken` models;
+- registration, login, token refresh, logout, and current-user endpoints;
+- Argon2 password and refresh-token hashing;
+- DTO validation, unit tests, E2E tests, and lightweight CI.
 
-## Project setup
+## Technology stack
 
-```bash
-$ npm install
+- Node.js 22 LTS
+- NestJS 11 and TypeScript
+- Prisma 7 with the PostgreSQL adapter
+- PostgreSQL 16
+- Docker Compose
+- JWT access and refresh tokens
+- Jest and Supertest
+
+## Architecture
+
+```text
+React Native client
+        |
+        | HTTPS REST API
+        v
+NestJS backend
+        |
+        | Prisma
+        v
+PostgreSQL
 ```
 
-## Compile and run the project
+The backend is a modular monolith with thin controllers, service-owned business logic, dependency injection, DTO validation, and direct database access through `PrismaService`. See [Architecture](docs/architecture.md) for details.
+
+## Local setup
+
+Requirements: Node.js 22 LTS, npm, and Docker.
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+npm install
+cp .env.example .env
+npm run db:up
+npm run prisma:migrate
+npm run prisma:generate
+npm run start:dev
 ```
 
-## Run tests
+The API listens on `http://localhost:3000` by default. The Docker Compose service exposes PostgreSQL on port `5432` and stores its data in a named volume.
+
+## Environment variables
+
+| Variable             | Required | Description                                                                                |
+| -------------------- | -------- | ------------------------------------------------------------------------------------------ |
+| `DATABASE_URL`       | Yes      | PostgreSQL connection string used by Prisma and the PostgreSQL adapter.                    |
+| `JWT_ACCESS_SECRET`  | Yes      | Secret used to sign and verify access tokens. Use a long random value.                     |
+| `JWT_REFRESH_SECRET` | Yes      | Separate secret used to sign and verify refresh tokens. Use a different long random value. |
+| `PORT`               | No       | HTTP port. Defaults to `3000`.                                                             |
+
+Copy [.env.example](.env.example) to `.env` and replace the JWT placeholders locally. Never commit `.env` or real secrets.
+
+## Database commands
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+npm run db:up             # start local PostgreSQL
+npm run db:down           # stop local PostgreSQL
+npm run prisma:migrate    # create or apply development migrations
+npm run prisma:generate   # regenerate Prisma Client
+npm run prisma:studio     # open Prisma Studio
 ```
 
-## Deployment
+Production and CI deployments should apply committed migrations with `npx prisma migrate deploy`.
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+## Development and verification
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+npm run start:dev
+npm run lint
+npm run build
+npm test
+npm run test:e2e
+npm run verify
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+`npm run verify` runs lint, build, and unit tests. E2E tests are a separate command.
 
-## Resources
+## Current API scope
 
-Check out a few resources that may come in handy when working with NestJS:
+Only authentication endpoints are currently implemented:
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+- `POST /auth/register`
+- `POST /auth/login`
+- `POST /auth/refresh`
+- `POST /auth/logout`
+- `GET /auth/me`
 
-## Support
+See [Auth API](docs/api.md) for request and response examples.
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+## Project documentation
 
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+- [Contributing](CONTRIBUTING.md)
+- [Architecture](docs/architecture.md)
+- [Auth API](docs/api.md)
+- [Database](docs/database.md)
+- [Architecture Decision Records](docs/adr/README.md)
