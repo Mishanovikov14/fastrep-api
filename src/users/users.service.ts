@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma, User } from '../../generated/prisma/client';
+import { SupportedLanguage } from '../common/enums/supported-language.enum';
 import { PrismaService } from '../prisma/prisma.service';
 import { PublicUser, publicUserSelect } from './user-select';
 
@@ -11,7 +12,7 @@ export type CreateUserData = {
   fullName: string;
   email: string;
   passwordHash: string;
-  language: string;
+  language: SupportedLanguage;
 };
 
 export type UpdateUserData = Partial<

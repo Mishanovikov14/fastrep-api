@@ -16,6 +16,9 @@ Authorization: Bearer <accessToken>
 
 Public user responses contain `id`, `fullName`, `email`, `language`, `photoUrl`, `isPremium`, `createdAt`, and `updatedAt`. They never contain `passwordHash` or stored refresh-token hashes.
 
+Supported user language codes are `en`, `fr`, `es`, `uk`, and `de`. The
+default is `en`.
+
 ## POST /auth/register
 
 Creates a user and signs the new user in.
@@ -31,14 +34,14 @@ Request body:
 | `fullName` | Yes      | String, 2-100 characters after trimming.                                  |
 | `email`    | Yes      | Valid email, maximum 254 characters. Stored in normalized lowercase form. |
 | `password` | Yes      | String, 8-128 characters.                                                 |
-| `language` | No       | One of `en`, `uk`, or `ru`; defaults to `en`.                             |
+| `language` | No       | One of `en`, `fr`, `es`, `uk`, or `de`; defaults to `en`.                 |
 
 ```json
 {
   "fullName": "Alex Morgan",
   "email": "alex@example.com",
   "password": "a-long-password",
-  "language": "en"
+  "language": "uk"
 }
 ```
 
@@ -50,7 +53,7 @@ Successful response:
     "id": "2f17b869-984d-42df-a306-d23d930829a1",
     "fullName": "Alex Morgan",
     "email": "alex@example.com",
-    "language": "en",
+    "language": "uk",
     "photoUrl": null,
     "isPremium": false,
     "createdAt": "2026-07-16T12:00:00.000Z",

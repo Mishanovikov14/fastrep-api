@@ -1,4 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
+import { SupportedLanguage } from '../../../common/enums/supported-language.enum';
 
 export class PublicUserResponseDto {
   @ApiProperty({
@@ -20,8 +21,8 @@ export class PublicUserResponseDto {
 
   @ApiProperty({
     type: String,
-    enum: ['en', 'uk', 'ru'],
-    example: 'uk',
+    enum: SupportedLanguage,
+    example: SupportedLanguage.UK,
   })
   language!: string;
 
