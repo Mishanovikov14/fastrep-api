@@ -9,12 +9,7 @@ import {
   MaxLength,
   MinLength,
 } from 'class-validator';
-
-export enum SupportedLanguage {
-  EN = 'en',
-  UK = 'uk',
-  RU = 'ru',
-}
+import { SupportedLanguage } from '../../common/enums/supported-language.enum';
 
 export class RegisterDto {
   @ApiProperty({

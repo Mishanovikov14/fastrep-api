@@ -6,6 +6,7 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { RefreshToken, User } from '../generated/prisma/client';
 import { AuthModule } from '../src/auth/auth.module';
+import { SupportedLanguage } from '../src/common/enums/supported-language.enum';
 import { PrismaService } from '../src/prisma/prisma.service';
 
 type UserFindArgs = {
@@ -113,6 +114,8 @@ type AuthResponseBody = {
     fullName: string;
     email: string;
     language: string;
+    passwordHash?: string;
+    tokenHash?: string;
   };
   accessToken: string;
   refreshToken: string;
@@ -166,7 +169,7 @@ describe('Authentication (e2e)', () => {
     await app.close();
   });
 
-  it('POST /auth/register creates a user and token pair', async () => {
+  it('POST /auth/register defaults an omitted language to en', async () => {
     const response = await request(app.getHttpServer())
       .post('/auth/register')
       .send(validRegistration)
@@ -179,9 +182,43 @@ describe('Authentication (e2e)', () => {
       language: 'en',
     });
     expect(body.user).not.toHaveProperty('passwordHash');
+    expect(body.user).not.toHaveProperty('tokenHash');
     expect(body.accessToken).toEqual(expect.any(String));
     expect(body.refreshToken).toEqual(expect.any(String));
   });
+
+  it.each(Object.values(SupportedLanguage))(
+    'POST /auth/register accepts supported language %s',
+    async (language) => {
+      const response = await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({
+          ...validRegistration,
+          email: `${language}-${randomUUID()}@example.com`,
+          language,
+        })
+        .expect(201);
+      const body = response.body as unknown as AuthResponseBody;
+
+      expect(body.user.language).toBe(language);
+      expect(body.user).not.toHaveProperty('passwordHash');
+      expect(body.user).not.toHaveProperty('tokenHash');
+    },
+  );
+
+  it.each(['ru', 'en-US', 'arbitrary'])(
+    'POST /auth/register rejects unsupported language %s',
+    async (language) => {
+      await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({
+          ...validRegistration,
+          email: `${randomUUID()}@example.com`,
+          language,
+        })
+        .expect(400);
+    },
+  );
 
   it('POST /auth/login authenticates valid credentials', async () => {
     await request(app.getHttpServer())
@@ -266,7 +303,7 @@ describe('Authentication (e2e)', () => {
         fullName: '',
         email: 'not-an-email',
         password: 'short',
-        language: 'de',
+        language: 'en',
         unexpected: true,
       })
       .expect(400);

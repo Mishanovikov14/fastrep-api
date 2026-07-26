@@ -7,6 +7,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as argon2 from 'argon2';
 import { randomUUID } from 'node:crypto';
+import { SupportedLanguage } from '../common/enums/supported-language.enum';
 import { normalizeEmail } from '../common/utils/normalize-email';
 import { PrismaService } from '../prisma/prisma.service';
 import { PublicUser } from '../users/user-select';
@@ -18,7 +19,7 @@ import {
 } from './auth.types';
 import { JWT_AUDIENCE, JWT_ISSUER } from './auth.constants';
 import { LoginDto } from './dto/login.dto';
-import { RegisterDto, SupportedLanguage } from './dto/register.dto';
+import { RegisterDto } from './dto/register.dto';
 
 const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
 const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;

@@ -112,6 +112,9 @@ Only authentication endpoints are currently implemented:
 
 See [Auth API](docs/api.md) for request and response examples.
 
+Supported user language codes are `en`, `fr`, `es`, `uk`, and `de`. The
+default is `en`.
+
 ## Project documentation
 
 - [Contributing](CONTRIBUTING.md)

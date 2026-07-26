@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file. The format 
 
 ## Unreleased
 
+### Changed
+
+- Aligned supported user language codes with the mobile application: `en`,
+  `fr`, `es`, `uk`, and `de`, defaulting to `en`.
+- Added a data migration that converts legacy `ru` user language values to
+  `en`.
+
 ### Added
 
 - Initial NestJS application.
