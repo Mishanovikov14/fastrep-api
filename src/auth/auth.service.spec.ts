@@ -140,8 +140,7 @@ describe('AuthService', () => {
       const matchesUsed =
         where.usedAt === undefined || request.usedAt === where.usedAt;
       const matchesExpiry =
-        where.expiresAt === undefined ||
-        request.expiresAt > where.expiresAt.gt;
+        where.expiresAt === undefined || request.expiresAt > where.expiresAt.gt;
       const matchesAttempts =
         where.attemptCount === undefined ||
         (typeof where.attemptCount === 'number'
@@ -160,16 +159,14 @@ describe('AuthService', () => {
       );
     };
     const passwordResetRequestDelegate = {
-      findFirst: jest.fn(
-        ({ where }: { where: PasswordResetWhere }) => {
-          const requests = [...passwordResetRequests.values()]
-            .filter((request) => matchesPasswordResetWhere(request, where))
-            .sort((left, right) => {
-              return right.createdAt.getTime() - left.createdAt.getTime();
-            });
-          return Promise.resolve(requests[0] ?? null);
-        },
-      ),
+      findFirst: jest.fn(({ where }: { where: PasswordResetWhere }) => {
+        const requests = [...passwordResetRequests.values()]
+          .filter((request) => matchesPasswordResetWhere(request, where))
+          .sort((left, right) => {
+            return right.createdAt.getTime() - left.createdAt.getTime();
+          });
+        return Promise.resolve(requests[0] ?? null);
+      }),
       create: jest.fn(
         ({
           data,
@@ -278,7 +275,9 @@ describe('AuthService', () => {
 
   const requestPasswordReset = async (): Promise<string> => {
     usersService.findByEmail.mockResolvedValue(user);
-    await authService.forgotPassword({ email: `  ${user.email.toUpperCase()} ` });
+    await authService.forgotPassword({
+      email: `  ${user.email.toUpperCase()} `,
+    });
 
     return mailService.sendPasswordResetCode.mock.calls.at(-1)?.[1] ?? '';
   };
@@ -515,15 +514,13 @@ describe('AuthService', () => {
     await expect(
       authService.login({ email: user.email, password: PASSWORD }),
     ).rejects.toBeInstanceOf(UnauthorizedException);
-    await expect(
-      authService.login({
-        email: user.email,
-        password: 'new-secure-password',
-      }),
-    ).resolves.toMatchObject({
-      accessToken: expect.any(String),
-      refreshToken: expect.any(String),
+    const result = await authService.login({
+      email: user.email,
+      password: 'new-secure-password',
     });
+
+    expect(typeof result.accessToken).toBe('string');
+    expect(typeof result.refreshToken).toBe('string');
   });
 
   it('increments incorrect attempts and invalidates the code at the maximum', async () => {
@@ -556,7 +553,9 @@ describe('AuthService', () => {
         newPassword: 'new-secure-password',
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
-    await expect(argon2.verify(user.passwordHash, PASSWORD)).resolves.toBe(true);
+    await expect(argon2.verify(user.passwordHash, PASSWORD)).resolves.toBe(
+      true,
+    );
   });
 
   it('allows only one concurrent reset to consume a code', async () => {
@@ -570,12 +569,12 @@ describe('AuthService', () => {
 
     const results = await Promise.allSettled([reset(), reset()]);
 
-    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(
-      1,
-    );
-    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(
-      1,
-    );
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === 'rejected'),
+    ).toHaveLength(1);
   });
 
   it('invalidates the reset request when mail delivery fails', async () => {

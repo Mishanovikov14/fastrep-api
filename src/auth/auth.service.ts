@@ -35,6 +35,7 @@ const DEFAULT_PASSWORD_RESET_CODE_TTL_MINUTES = 15;
 const DEFAULT_PASSWORD_RESET_MAX_ATTEMPTS = 5;
 const DEFAULT_PASSWORD_RESET_RESEND_COOLDOWN_SECONDS = 60;
 const INVALID_RESET_CODE_MESSAGE = 'Invalid or expired password reset code';
+const TOO_MANY_REQUESTS_STATUS: number = HttpStatus.TOO_MANY_REQUESTS;
 
 @Injectable()
 export class AuthService {
@@ -206,7 +207,7 @@ export class AuthService {
     } catch (error) {
       if (
         error instanceof HttpException &&
-        error.getStatus() === HttpStatus.TOO_MANY_REQUESTS
+        error.getStatus() === TOO_MANY_REQUESTS_STATUS
       ) {
         throw error;
       }

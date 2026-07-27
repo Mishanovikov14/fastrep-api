@@ -5,16 +5,17 @@ import { MailMessage, MailProvider } from '../mail.types';
 
 @Injectable()
 export class ResendMailProvider implements MailProvider {
-  private readonly resend: Resend;
+  private readonly resend: Resend | null;
 
   constructor(private readonly configService: ConfigService) {
-    this.resend = new Resend(this.configService.get<string>('RESEND_API_KEY'));
+    const apiKey = this.configService.get<string>('RESEND_API_KEY');
+    this.resend = apiKey ? new Resend(apiKey) : null;
   }
 
   async send(message: MailMessage): Promise<void> {
     const from = this.configService.get<string>('EMAIL_FROM');
 
-    if (!from || !this.configService.get<string>('RESEND_API_KEY')) {
+    if (!from || !this.resend) {
       throw new ServiceUnavailableException('Email service is unavailable');
     }
 

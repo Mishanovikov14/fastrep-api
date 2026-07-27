@@ -154,9 +154,9 @@ describe('Swagger configuration (e2e)', () => {
         .expect(200);
       const document = response.body as unknown as OpenApiSchema;
 
-      expect(document.paths['/auth/forgot-password'].post.description).toContain(
-        'account exists',
-      );
+      expect(
+        document.paths['/auth/forgot-password'].post.description,
+      ).toContain('account exists');
       expect(document.paths['/auth/reset-password'].post.description).toContain(
         'revokes every refresh session',
       );

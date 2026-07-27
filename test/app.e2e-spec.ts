@@ -125,8 +125,7 @@ class InMemoryPrismaService {
       const requests = [...this.passwordResetRequests.values()]
         .filter((item) => item.userId === where.userId)
         .sort(
-          (left, right) =>
-            right.createdAt.getTime() - left.createdAt.getTime(),
+          (left, right) => right.createdAt.getTime() - left.createdAt.getTime(),
         );
       return Promise.resolve(requests[0] ?? null);
     },
