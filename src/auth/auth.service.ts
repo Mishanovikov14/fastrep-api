@@ -1,14 +1,20 @@
 import {
+  BadRequestException,
   ConflictException,
+  HttpException,
+  HttpStatus,
   Injectable,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as argon2 from 'argon2';
-import { randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
+import { Prisma } from '../../generated/prisma/client';
 import { SupportedLanguage } from '../common/enums/supported-language.enum';
 import { normalizeEmail } from '../common/utils/normalize-email';
+import { MailService } from '../mail/mail.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PublicUser } from '../users/user-select';
 import { UsersService } from '../users/users.service';
@@ -18,11 +24,18 @@ import {
   TokenPair,
 } from './auth.types';
 import { JWT_AUDIENCE, JWT_ISSUER } from './auth.constants';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 
 const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
 const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
+const DEFAULT_PASSWORD_RESET_CODE_TTL_MINUTES = 15;
+const DEFAULT_PASSWORD_RESET_MAX_ATTEMPTS = 5;
+const DEFAULT_PASSWORD_RESET_RESEND_COOLDOWN_SECONDS = 60;
+const INVALID_RESET_CODE_MESSAGE = 'Invalid or expired password reset code';
+const TOO_MANY_REQUESTS_STATUS: number = HttpStatus.TOO_MANY_REQUESTS;
 
 @Injectable()
 export class AuthService {
@@ -31,6 +44,7 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
+    private readonly mailService: MailService,
   ) {}
 
   async register(dto: RegisterDto): Promise<AuthenticationResult> {
@@ -134,6 +148,172 @@ export class AuthService {
     });
   }
 
+  async forgotPassword(dto: ForgotPasswordDto): Promise<void> {
+    const email = normalizeEmail(dto.email);
+    const user = await this.usersService.findByEmail(email);
+
+    if (!user) {
+      return;
+    }
+
+    const now = new Date();
+    const ttlMinutes = this.getPositiveInteger(
+      'PASSWORD_RESET_CODE_TTL_MINUTES',
+      DEFAULT_PASSWORD_RESET_CODE_TTL_MINUTES,
+    );
+    const cooldownSeconds = this.getPositiveInteger(
+      'PASSWORD_RESET_RESEND_COOLDOWN_SECONDS',
+      DEFAULT_PASSWORD_RESET_RESEND_COOLDOWN_SECONDS,
+    );
+    const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
+    const codeHash = await argon2.hash(code, { type: argon2.argon2id });
+
+    let requestId: string;
+
+    try {
+      const request = await this.prisma.$transaction(async (transaction) => {
+        const latestRequest = await transaction.passwordResetRequest.findFirst({
+          where: { userId: user.id },
+          orderBy: { createdAt: 'desc' },
+        });
+        const cooldownStartedAt = new Date(
+          now.getTime() - cooldownSeconds * 1000,
+        );
+
+        if (
+          latestRequest &&
+          latestRequest.createdAt.getTime() > cooldownStartedAt.getTime()
+        ) {
+          throw new HttpException(
+            'Please wait before requesting another code',
+            HttpStatus.TOO_MANY_REQUESTS,
+          );
+        }
+
+        await transaction.passwordResetRequest.updateMany({
+          where: { userId: user.id, usedAt: null },
+          data: { usedAt: now },
+        });
+
+        return transaction.passwordResetRequest.create({
+          data: {
+            userId: user.id,
+            codeHash,
+            expiresAt: new Date(now.getTime() + ttlMinutes * 60_000),
+          },
+        });
+      });
+      requestId = request.id;
+    } catch (error) {
+      if (
+        error instanceof HttpException &&
+        error.getStatus() === TOO_MANY_REQUESTS_STATUS
+      ) {
+        throw error;
+      }
+
+      if (this.isPasswordResetWriteConflict(error)) {
+        throw new HttpException(
+          'Please wait before requesting another code',
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+
+      throw new ServiceUnavailableException(
+        'Password reset is temporarily unavailable',
+      );
+    }
+
+    try {
+      await this.mailService.sendPasswordResetCode(email, code, ttlMinutes);
+    } catch {
+      await this.prisma.passwordResetRequest.updateMany({
+        where: { id: requestId, usedAt: null },
+        data: { usedAt: new Date() },
+      });
+      throw new ServiceUnavailableException(
+        'Password reset is temporarily unavailable',
+      );
+    }
+  }
+
+  async resetPassword(dto: ResetPasswordDto): Promise<void> {
+    const email = normalizeEmail(dto.email);
+    const user = await this.usersService.findByEmail(email);
+
+    if (!user) {
+      throw new BadRequestException(INVALID_RESET_CODE_MESSAGE);
+    }
+
+    const request = await this.prisma.passwordResetRequest.findFirst({
+      where: { userId: user.id },
+      orderBy: { createdAt: 'desc' },
+    });
+    const maxAttempts = this.getPositiveInteger(
+      'PASSWORD_RESET_MAX_ATTEMPTS',
+      DEFAULT_PASSWORD_RESET_MAX_ATTEMPTS,
+    );
+    const now = new Date();
+
+    if (
+      !request ||
+      request.usedAt ||
+      request.expiresAt <= now ||
+      request.attemptCount >= maxAttempts
+    ) {
+      throw new BadRequestException(INVALID_RESET_CODE_MESSAGE);
+    }
+
+    const codeIsValid = await this.verifyHash(request.codeHash, dto.code);
+
+    if (!codeIsValid) {
+      await this.recordFailedResetAttempt(
+        request.id,
+        request.attemptCount,
+        maxAttempts,
+        now,
+      );
+      throw new BadRequestException(INVALID_RESET_CODE_MESSAGE);
+    }
+
+    const passwordHash = await argon2.hash(dto.newPassword, {
+      type: argon2.argon2id,
+    });
+
+    await this.prisma.$transaction(async (transaction) => {
+      const claimed = await transaction.passwordResetRequest.updateMany({
+        where: {
+          id: request.id,
+          userId: user.id,
+          usedAt: null,
+          expiresAt: { gt: now },
+          attemptCount: { lt: maxAttempts },
+        },
+        data: { usedAt: now },
+      });
+
+      if (claimed.count !== 1) {
+        throw new BadRequestException(INVALID_RESET_CODE_MESSAGE);
+      }
+
+      await transaction.user.update({
+        where: { id: user.id },
+        data: { passwordHash },
+      });
+      await transaction.passwordResetRequest.updateMany({
+        where: {
+          userId: user.id,
+          id: { not: request.id },
+          usedAt: null,
+        },
+        data: { usedAt: now },
+      });
+      await transaction.refreshToken.deleteMany({
+        where: { userId: user.id },
+      });
+    });
+  }
+
   getMe(userId: string): Promise<PublicUser> {
     return this.getUser(userId);
   }
@@ -234,5 +414,49 @@ export class AuthService {
 
   private getRefreshExpiration(): Date {
     return new Date(Date.now() + REFRESH_TOKEN_TTL_SECONDS * 1000);
+  }
+
+  private async recordFailedResetAttempt(
+    requestId: string,
+    attemptCount: number,
+    maxAttempts: number,
+    attemptedAt: Date,
+  ): Promise<void> {
+    await this.prisma.$transaction(async (transaction) => {
+      const updated = await transaction.passwordResetRequest.updateMany({
+        where: {
+          id: requestId,
+          usedAt: null,
+          expiresAt: { gt: attemptedAt },
+          attemptCount,
+        },
+        data: { attemptCount: { increment: 1 } },
+      });
+
+      if (updated.count === 1 && attemptCount + 1 >= maxAttempts) {
+        await transaction.passwordResetRequest.updateMany({
+          where: {
+            id: requestId,
+            usedAt: null,
+            attemptCount: { gte: maxAttempts },
+          },
+          data: { usedAt: attemptedAt },
+        });
+      }
+    });
+  }
+
+  private getPositiveInteger(key: string, fallback: number): number {
+    const configured = this.configService.get<string | number>(key);
+    const value = Number(configured ?? fallback);
+
+    return Number.isInteger(value) && value > 0 ? value : fallback;
+  }
+
+  private isPasswordResetWriteConflict(error: unknown): boolean {
+    return (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      ['P2002', 'P2034'].includes(error.code)
+    );
   }
 }

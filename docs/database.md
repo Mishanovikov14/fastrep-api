@@ -1,6 +1,6 @@
 # Database
 
-FastRep currently uses PostgreSQL through Prisma. The schema contains only `User` and `RefreshToken`; there are no report or media tables yet.
+FastRep currently uses PostgreSQL through Prisma. The authentication schema contains `User`, `RefreshToken`, and `PasswordResetRequest`; there are no report or media tables yet.
 
 ## User
 
@@ -37,6 +37,15 @@ values to `en`.
 One user can have multiple refresh-token records because each login creates a new token and separate mobile sessions can coexist. Refresh tokens are stored as hashes so a database read does not reveal usable session credentials. Refresh replaces the current record with a new record, and logout deletes the supplied token's record.
 
 The relation uses `onDelete: Cascade`: deleting a user automatically deletes all refresh-token records owned by that user.
+
+## PasswordResetRequest
+
+Each request stores an Argon2id hash of a cryptographically generated six-digit
+code, its expiry, failed-attempt count, and single-use state. Plaintext codes are
+never stored. Indexes support user lookup, expiry cleanup, and latest-request
+lookup. A partial unique database index ensures a user cannot have more than one
+unused reset request at a time. Successful resets atomically update the password,
+consume reset requests, and delete all refresh-token sessions.
 
 ## Schema changes and migrations
 

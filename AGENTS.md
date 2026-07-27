@@ -7,8 +7,13 @@
 - Prisma access goes through `PrismaService`.
 - Do not instantiate `PrismaClient` outside `PrismaService`.
 - External providers must be wrapped behind focused services.
+- External email providers must stay behind the mail abstraction.
 - Secrets come only from environment variables.
 - Never commit `.env` files or credentials.
+- Never log passwords, reset codes, token values, or secrets.
+- Password reset codes must never be stored in plaintext.
+- Forgot-password responses must not reveal account existence.
+- Successful password resets must revoke all refresh sessions.
 
 ## Prisma
 

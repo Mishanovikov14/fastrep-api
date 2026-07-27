@@ -170,3 +170,32 @@ Typical error response:
   "error": "Unauthorized"
 }
 ```
+
+## POST /auth/forgot-password
+
+Requests a six-digit password-reset code by email. Email addresses are trimmed
+and lowercased. The response is always `204 No Content` for both existing and
+unknown accounts, so account existence is not disclosed. Codes expire after 15
+minutes by default, and repeated requests are subject to IP throttling and a
+60-second per-account cooldown.
+
+```json
+{
+  "email": "alex@example.com"
+}
+```
+
+## POST /auth/reset-password
+
+Consumes a single-use six-digit code and replaces the password. The new password
+uses the registration rule of 8-128 characters. Success is `204 No Content` and
+returns no tokens. All refresh sessions are revoked, so the user must log in
+again. Invalid, expired, used, and exhausted codes receive the same safe error.
+
+```json
+{
+  "email": "alex@example.com",
+  "code": "123456",
+  "newPassword": "a-new-long-password"
+}
+```
