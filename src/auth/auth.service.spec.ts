@@ -443,7 +443,7 @@ describe('AuthService', () => {
     ).resolves.toBeUndefined();
     await expect(
       authService.forgotPassword({ email: 'missing@example.com' }),
-    ).rejects.toMatchObject({ status: 429 });
+    ).resolves.toBeUndefined();
     expect(passwordResetRequests.size).toBe(0);
     expect(mailService.sendPasswordResetCode).not.toHaveBeenCalled();
   });
@@ -452,11 +452,8 @@ describe('AuthService', () => {
     await requestPasswordReset();
     const firstRequest = getLatestResetRequest();
     firstRequest.createdAt = new Date(Date.now() - 61_000);
-    const dateNow = jest
-      .spyOn(Date, 'now')
-      .mockReturnValue(Date.now() + 61_000);
 
-    await requestPasswordReset().finally(() => dateNow.mockRestore());
+    await requestPasswordReset();
     const latestRequest = getLatestResetRequest();
 
     expect(passwordResetRequests.size).toBe(2);
@@ -465,7 +462,7 @@ describe('AuthService', () => {
     expect(latestRequest.usedAt).toBeNull();
   });
 
-  it('enforces the resend cooldown', async () => {
+  it('enforces the resend cooldown from the latest database request', async () => {
     await requestPasswordReset();
 
     const secondRequest = authService.forgotPassword({ email: user.email });

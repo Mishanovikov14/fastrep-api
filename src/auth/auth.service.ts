@@ -10,7 +10,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as argon2 from 'argon2';
-import { createHash, randomInt, randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import { Prisma } from '../../generated/prisma/client';
 import { SupportedLanguage } from '../common/enums/supported-language.enum';
 import { normalizeEmail } from '../common/utils/normalize-email';
@@ -38,8 +38,6 @@ const INVALID_RESET_CODE_MESSAGE = 'Invalid or expired password reset code';
 
 @Injectable()
 export class AuthService {
-  private readonly forgotPasswordCooldowns = new Map<string, number>();
-
   constructor(
     private readonly usersService: UsersService,
     private readonly prisma: PrismaService,
@@ -151,14 +149,6 @@ export class AuthService {
 
   async forgotPassword(dto: ForgotPasswordDto): Promise<void> {
     const email = normalizeEmail(dto.email);
-    const cooldownSeconds = this.getPositiveInteger(
-      'PASSWORD_RESET_RESEND_COOLDOWN_SECONDS',
-      DEFAULT_PASSWORD_RESET_RESEND_COOLDOWN_SECONDS,
-    );
-    const cooldownKey = this.enforceForgotPasswordCooldown(
-      email,
-      cooldownSeconds,
-    );
     const user = await this.usersService.findByEmail(email);
 
     if (!user) {
@@ -169,6 +159,10 @@ export class AuthService {
     const ttlMinutes = this.getPositiveInteger(
       'PASSWORD_RESET_CODE_TTL_MINUTES',
       DEFAULT_PASSWORD_RESET_CODE_TTL_MINUTES,
+    );
+    const cooldownSeconds = this.getPositiveInteger(
+      'PASSWORD_RESET_RESEND_COOLDOWN_SECONDS',
+      DEFAULT_PASSWORD_RESET_RESEND_COOLDOWN_SECONDS,
     );
     const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
     const codeHash = await argon2.hash(code, { type: argon2.argon2id });
@@ -224,7 +218,6 @@ export class AuthService {
         );
       }
 
-      this.forgotPasswordCooldowns.delete(cooldownKey);
       throw new ServiceUnavailableException(
         'Password reset is temporarily unavailable',
       );
@@ -233,7 +226,6 @@ export class AuthService {
     try {
       await this.mailService.sendPasswordResetCode(email, code, ttlMinutes);
     } catch {
-      this.forgotPasswordCooldowns.delete(cooldownKey);
       await this.prisma.passwordResetRequest.updateMany({
         where: { id: requestId, usedAt: null },
         data: { usedAt: new Date() },
@@ -465,33 +457,5 @@ export class AuthService {
       error instanceof Prisma.PrismaClientKnownRequestError &&
       ['P2002', 'P2034'].includes(error.code)
     );
-  }
-
-  private enforceForgotPasswordCooldown(
-    email: string,
-    cooldownSeconds: number,
-  ): string {
-    const key = createHash('sha256').update(email).digest('hex');
-    const now = Date.now();
-    const cooldownUntil = this.forgotPasswordCooldowns.get(key);
-
-    if (cooldownUntil && cooldownUntil > now) {
-      throw new HttpException(
-        'Please wait before requesting another code',
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
-    }
-
-    this.forgotPasswordCooldowns.set(key, now + cooldownSeconds * 1000);
-
-    if (this.forgotPasswordCooldowns.size > 1_000) {
-      for (const [storedKey, storedUntil] of this.forgotPasswordCooldowns) {
-        if (storedUntil <= now) {
-          this.forgotPasswordCooldowns.delete(storedKey);
-        }
-      }
-    }
-
-    return key;
   }
 }
