@@ -124,7 +124,7 @@ describe('ReportsService', () => {
   it('updates an owned report', async () => {
     const updatedReport = createReport({
       title: 'Updated inspection',
-      status: ReportStatus.READY,
+      notes: 'Updated notes.',
     });
     reportDelegate.updateMany.mockResolvedValue({ count: 1 });
     reportDelegate.findFirst.mockResolvedValue(updatedReport);
@@ -132,14 +132,14 @@ describe('ReportsService', () => {
     await expect(
       service.update('user-id', report.id, {
         title: updatedReport.title,
-        status: ReportStatus.READY,
+        notes: updatedReport.notes ?? undefined,
       }),
     ).resolves.toEqual(updatedReport);
     expect(reportDelegate.updateMany).toHaveBeenCalledWith({
       where: { id: report.id, userId: 'user-id' },
       data: {
         title: updatedReport.title,
-        status: ReportStatus.READY,
+        notes: updatedReport.notes,
       },
     });
   });

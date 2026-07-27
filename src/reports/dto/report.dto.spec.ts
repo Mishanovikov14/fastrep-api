@@ -1,7 +1,6 @@
 import { BadRequestException, ValidationPipe } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
-import { ReportStatus } from '../../../generated/prisma/client';
 import { CreateReportDto } from './create-report.dto';
 import { ListReportsQueryDto } from './list-reports-query.dto';
 import { UpdateReportDto } from './update-report.dto';
@@ -36,31 +35,26 @@ describe('Report DTO validation', () => {
     expect(errors.length).toBeGreaterThan(0);
   });
 
-  it('supports partial updates with a valid status enum', async () => {
-    await expect(
-      validate(
-        plainToInstance(UpdateReportDto, {
-          status: ReportStatus.PROCESSING,
-        }),
-      ),
-    ).resolves.toHaveLength(0);
+  it('supports partial title and notes updates', async () => {
+    const dto = plainToInstance(UpdateReportDto, {
+      title: '  Updated inspection  ',
+      notes: '  Updated notes.  ',
+    });
+
+    await expect(validate(dto)).resolves.toHaveLength(0);
+    expect(dto).toMatchObject({
+      title: 'Updated inspection',
+      notes: 'Updated notes.',
+    });
     await expect(
       validate(plainToInstance(UpdateReportDto, {})),
     ).resolves.toHaveLength(0);
   });
 
-  it('rejects an invalid report status', async () => {
-    const errors = await validate(
-      plainToInstance(UpdateReportDto, { status: 'UNKNOWN' }),
-    );
-
-    expect(errors[0]?.constraints).toHaveProperty('isEnum');
-  });
-
-  it('rejects unknown update fields', async () => {
+  it('rejects status as a non-whitelisted update field', async () => {
     await expect(
       strictValidationPipe.transform(
-        { title: 'Valid', userId: 'another-user' },
+        { title: 'Valid', status: 'READY' },
         {
           type: 'body',
           metatype: UpdateReportDto,

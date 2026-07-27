@@ -53,7 +53,5 @@ model Report {
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([userId])
-  @@index([status])
-  @@index([createdAt(sort: Desc)])
+  @@index([userId, createdAt(sort: Desc)])
 }

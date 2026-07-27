@@ -56,7 +56,11 @@ export const ApiGetReport = () =>
 export const ApiUpdateReport = () =>
   applyDecorators(
     authenticatedEndpoint(),
-    ApiOperation({ summary: 'Update one owned report' }),
+    ApiOperation({
+      summary: 'Update one owned report',
+      description:
+        'Updates the report title and/or notes. Report status is server-managed.',
+    }),
     ApiOkResponse({
       description: 'Report updated successfully.',
       type: ReportResponseDto,
