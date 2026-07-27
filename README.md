@@ -62,10 +62,13 @@ The API listens on `http://localhost:3000` by default. The Docker Compose servic
 | `DATABASE_URL`       | Yes      | PostgreSQL connection string used by Prisma and the PostgreSQL adapter.                    |
 | `JWT_ACCESS_SECRET`  | Yes      | Secret used to sign and verify access tokens. Use a long random value.                     |
 | `JWT_REFRESH_SECRET` | Yes      | Separate secret used to sign and verify refresh tokens. Use a different long random value. |
-| `PORT`               | No       | HTTP port. Defaults to `3000`.                                                             |
-| `SWAGGER_ENABLED`    | No       | Exposes Swagger only when set to `true`.                                                   |
+| `NODE_ENV`           | Yes      | Runtime environment. Use `production` for hosted deployments.                              |
+| `PORT`               | Production | HTTP port. Defaults to `3000` outside production.                                        |
+| `SWAGGER_ENABLED`    | Production | Exposes Swagger only when set to `true`.                                                 |
 
-Copy [.env.example](.env.example) to `.env` and replace the JWT placeholders locally. Never commit `.env` or real secrets.
+Copy [.env.example](.env.example) to `.env`, set the local Docker Compose
+database URL (`postgresql://fastrep:fastrep_password@localhost:5432/fastrep?schema=public`),
+and replace the JWT placeholders locally. Never commit `.env` or real secrets.
 
 ## Swagger
 
@@ -86,6 +89,28 @@ npm run prisma:studio     # open Prisma Studio
 ```
 
 Production and CI deployments should apply committed migrations with `npx prisma migrate deploy`.
+
+## Railway deployment
+
+Railway builds and starts the API from committed source; generated Prisma Client
+files are not committed. Configure Railway environment variables, including the
+Neon PostgreSQL connection string as `DATABASE_URL`, then use:
+
+```bash
+npm ci
+npm run prisma:generate
+npm run build
+npm run prisma:migrate:deploy
+npm run start:prod
+```
+
+`npm run build` also generates Prisma Client so a clean checkout cannot compile
+against stale or missing generated types. Railway can run the migration and
+start steps together with `npm run deploy:railway`. Production migrations use
+only committed migrations and never `prisma migrate dev`.
+
+The service binds to Railway's `PORT` on `0.0.0.0`. `GET /health` returns a
+minimal operational status for health checks.
 
 ## Development and verification
 
