@@ -7,6 +7,7 @@ import { App } from 'supertest/types';
 import { RefreshToken, User } from '../generated/prisma/client';
 import { AuthModule } from '../src/auth/auth.module';
 import { SupportedLanguage } from '../src/common/enums/supported-language.enum';
+import { MailService } from '../src/mail/mail.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 
 type UserFindArgs = {
@@ -24,12 +25,27 @@ type RefreshTokenCreateArgs = {
 };
 
 type RefreshTokenWhereArgs = {
-  where: { id: string; userId?: string };
+  where: { id?: string; userId?: string };
+};
+
+type PasswordResetRequestRecord = {
+  id: string;
+  userId: string;
+  codeHash: string;
+  expiresAt: Date;
+  attemptCount: number;
+  usedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
 };
 
 class InMemoryPrismaService {
   readonly users = new Map<string, User>();
   readonly refreshTokens = new Map<string, RefreshToken>();
+  readonly passwordResetRequests = new Map<
+    string,
+    PasswordResetRequestRecord
+  >();
 
   readonly user = {
     findUnique: ({ where, select }: UserFindArgs) => {
@@ -59,6 +75,23 @@ class InMemoryPrismaService {
       this.users.set(user.id, user);
       return Promise.resolve(this.selectFields(user, select));
     },
+    update: ({
+      where,
+      data,
+    }: {
+      where: { id: string };
+      data: { passwordHash: string };
+    }) => {
+      const user = this.users.get(where.id);
+
+      if (!user) {
+        throw new Error('User not found');
+      }
+
+      user.passwordHash = data.passwordHash;
+      user.updatedAt = new Date();
+      return Promise.resolve({ ...user });
+    },
   };
 
   readonly refreshToken = {
@@ -70,16 +103,114 @@ class InMemoryPrismaService {
       return Promise.resolve(refreshToken);
     },
     deleteMany: ({ where }: RefreshTokenWhereArgs) => {
-      const storedToken = this.refreshTokens.get(where.id);
-      const canDelete =
-        storedToken &&
-        (where.userId === undefined || storedToken.userId === where.userId);
+      let count = 0;
 
-      if (canDelete) {
-        this.refreshTokens.delete(where.id);
+      for (const [id, storedToken] of this.refreshTokens) {
+        const matchesId = where.id === undefined || id === where.id;
+        const matchesUser =
+          where.userId === undefined || storedToken.userId === where.userId;
+
+        if (matchesId && matchesUser) {
+          this.refreshTokens.delete(id);
+          count += 1;
+        }
       }
 
-      return Promise.resolve({ count: canDelete ? 1 : 0 });
+      return Promise.resolve({ count });
+    },
+  };
+
+  readonly passwordResetRequest = {
+    findFirst: ({ where }: { where: { userId: string } }) => {
+      const requests = [...this.passwordResetRequests.values()]
+        .filter((item) => item.userId === where.userId)
+        .sort(
+          (left, right) =>
+            right.createdAt.getTime() - left.createdAt.getTime(),
+        );
+      return Promise.resolve(requests[0] ?? null);
+    },
+    create: ({
+      data,
+    }: {
+      data: Pick<
+        PasswordResetRequestRecord,
+        'userId' | 'codeHash' | 'expiresAt'
+      >;
+    }) => {
+      const now = new Date();
+      const resetRequest: PasswordResetRequestRecord = {
+        id: randomUUID(),
+        ...data,
+        attemptCount: 0,
+        usedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.passwordResetRequests.set(resetRequest.id, resetRequest);
+      return Promise.resolve(resetRequest);
+    },
+    updateMany: ({
+      where,
+      data,
+    }: {
+      where: {
+        id?: string | { not: string };
+        userId?: string;
+        usedAt?: null;
+        expiresAt?: { gt: Date };
+        attemptCount?: number | { lt?: number; gte?: number };
+      };
+      data: {
+        usedAt?: Date;
+        attemptCount?: { increment: number };
+      };
+    }) => {
+      let count = 0;
+
+      for (const resetRequest of this.passwordResetRequests.values()) {
+        const matchesId =
+          where.id === undefined ||
+          (typeof where.id === 'string'
+            ? resetRequest.id === where.id
+            : resetRequest.id !== where.id.not);
+        const matchesUser =
+          where.userId === undefined || resetRequest.userId === where.userId;
+        const matchesUsed =
+          where.usedAt === undefined || resetRequest.usedAt === where.usedAt;
+        const matchesExpiry =
+          where.expiresAt === undefined ||
+          resetRequest.expiresAt > where.expiresAt.gt;
+        const matchesAttempts =
+          where.attemptCount === undefined ||
+          (typeof where.attemptCount === 'number'
+            ? resetRequest.attemptCount === where.attemptCount
+            : (where.attemptCount.lt === undefined ||
+                resetRequest.attemptCount < where.attemptCount.lt) &&
+              (where.attemptCount.gte === undefined ||
+                resetRequest.attemptCount >= where.attemptCount.gte));
+
+        if (
+          !matchesId ||
+          !matchesUser ||
+          !matchesUsed ||
+          !matchesExpiry ||
+          !matchesAttempts
+        ) {
+          continue;
+        }
+
+        if (data.usedAt !== undefined) {
+          resetRequest.usedAt = data.usedAt;
+        }
+        if (data.attemptCount) {
+          resetRequest.attemptCount += data.attemptCount.increment;
+        }
+        resetRequest.updatedAt = new Date();
+        count += 1;
+      }
+
+      return Promise.resolve({ count });
     },
   };
 
@@ -132,9 +263,13 @@ type ValidationErrorBody = {
 describe('Authentication (e2e)', () => {
   let app: INestApplication<App>;
   let prisma: InMemoryPrismaService;
+  let mailService: jest.Mocked<Pick<MailService, 'sendPasswordResetCode'>>;
 
   beforeEach(async () => {
     prisma = new InMemoryPrismaService();
+    mailService = {
+      sendPasswordResetCode: jest.fn().mockResolvedValue(undefined),
+    };
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [
         ConfigModule.forRoot({
@@ -144,6 +279,9 @@ describe('Authentication (e2e)', () => {
             () => ({
               JWT_ACCESS_SECRET: 'e2e-access-secret',
               JWT_REFRESH_SECRET: 'e2e-refresh-secret',
+              PASSWORD_RESET_CODE_TTL_MINUTES: '15',
+              PASSWORD_RESET_MAX_ATTEMPTS: '5',
+              PASSWORD_RESET_RESEND_COOLDOWN_SECONDS: '60',
             }),
           ],
         }),
@@ -152,6 +290,8 @@ describe('Authentication (e2e)', () => {
     })
       .overrideProvider(PrismaService)
       .useValue(prisma)
+      .overrideProvider(MailService)
+      .useValue(mailService)
       .compile();
 
     app = moduleFixture.createNestApplication();
@@ -294,6 +434,75 @@ describe('Authentication (e2e)', () => {
 
     expect(body.email).toBe(validRegistration.email);
     expect(body).not.toHaveProperty('passwordHash');
+  });
+
+  it('password recovery does not disclose account existence and returns no secrets', async () => {
+    await request(app.getHttpServer())
+      .post('/auth/register')
+      .send(validRegistration)
+      .expect(201);
+
+    const existingResponse = await request(app.getHttpServer())
+      .post('/auth/forgot-password')
+      .send({ email: validRegistration.email.toUpperCase() })
+      .expect(204);
+    const unknownResponse = await request(app.getHttpServer())
+      .post('/auth/forgot-password')
+      .send({ email: 'missing@example.com' })
+      .expect(204);
+
+    expect(existingResponse.text).toBe('');
+    expect(unknownResponse.text).toBe('');
+    expect(existingResponse.status).toBe(unknownResponse.status);
+    expect(mailService.sendPasswordResetCode).toHaveBeenCalledTimes(1);
+    expect(existingResponse.body).not.toHaveProperty('password');
+    expect(existingResponse.body).not.toHaveProperty('code');
+  });
+
+  it('resets the password without returning tokens and requires a new login', async () => {
+    const registration = await request(app.getHttpServer())
+      .post('/auth/register')
+      .send(validRegistration)
+      .expect(201);
+    const registrationBody = registration.body as unknown as AuthResponseBody;
+
+    await request(app.getHttpServer())
+      .post('/auth/forgot-password')
+      .send({ email: validRegistration.email })
+      .expect(204);
+    const code = mailService.sendPasswordResetCode.mock.calls[0]?.[1];
+
+    expect(code).toMatch(/^\d{6}$/);
+    const resetResponse = await request(app.getHttpServer())
+      .post('/auth/reset-password')
+      .send({
+        email: validRegistration.email,
+        code,
+        newPassword: 'new-secure-password',
+      })
+      .expect(204);
+
+    expect(resetResponse.text).toBe('');
+    expect(resetResponse.body).not.toHaveProperty('accessToken');
+    expect(resetResponse.body).not.toHaveProperty('refreshToken');
+    await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({
+        email: validRegistration.email,
+        password: validRegistration.password,
+      })
+      .expect(401);
+    await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({
+        email: validRegistration.email,
+        password: 'new-secure-password',
+      })
+      .expect(200);
+    await request(app.getHttpServer())
+      .post('/auth/refresh')
+      .send({ refreshToken: registrationBody.refreshToken })
+      .expect(401);
   });
 
   it('rejects invalid registration DTOs', async () => {
