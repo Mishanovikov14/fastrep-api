@@ -50,6 +50,18 @@ const createAuthSwaggerApp = async (): Promise<INestApplication<App>> => {
 };
 
 type OpenApiSchema = {
+  paths: {
+    '/auth/forgot-password': {
+      post: {
+        description: string;
+      };
+    };
+    '/auth/reset-password': {
+      post: {
+        description: string;
+      };
+    };
+  };
   components: {
     schemas: {
       RegisterDto: {
@@ -67,6 +79,13 @@ type OpenApiSchema = {
           language: {
             enum: string[];
             example: string;
+          };
+        };
+      };
+      ResetPasswordDto: {
+        properties: {
+          code: {
+            pattern: string;
           };
         };
       };
@@ -121,6 +140,29 @@ describe('Swagger configuration (e2e)', () => {
         enum: Object.values(SupportedLanguage),
         example: SupportedLanguage.UK,
       });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('documents password recovery behavior and the six-digit code contract', async () => {
+    const app = await createAuthSwaggerApp();
+
+    try {
+      const response = await request(app.getHttpServer())
+        .get('/api/docs-json')
+        .expect(200);
+      const document = response.body as unknown as OpenApiSchema;
+
+      expect(
+        document.paths['/auth/forgot-password'].post.description,
+      ).toContain('account exists');
+      expect(document.paths['/auth/reset-password'].post.description).toContain(
+        'revokes every refresh session',
+      );
+      expect(
+        document.components.schemas.ResetPasswordDto.properties.code.pattern,
+      ).toBe('^\\d{6}$');
     } finally {
       await app.close();
     }

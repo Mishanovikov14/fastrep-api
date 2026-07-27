@@ -9,9 +9,10 @@ The repository currently includes:
 - a NestJS modular monolith;
 - PostgreSQL running locally through Docker Compose;
 - Prisma schema, migrations, and generated client integration;
-- `User` and `RefreshToken` models;
-- registration, login, token refresh, logout, and current-user endpoints;
+- `User`, `RefreshToken`, and `PasswordResetRequest` models;
+- registration, login, token refresh, logout, current-user, and email password-recovery endpoints;
 - Argon2 password and refresh-token hashing;
+- Resend email delivery behind a generic mail abstraction;
 - DTO validation, unit tests, E2E tests, and lightweight CI.
 
 ## Technology stack
@@ -62,6 +63,11 @@ The API listens on `http://localhost:3000` by default. The Docker Compose servic
 | `DATABASE_URL`       | Yes      | PostgreSQL connection string used by Prisma and the PostgreSQL adapter.                    |
 | `JWT_ACCESS_SECRET`  | Yes      | Secret used to sign and verify access tokens. Use a long random value.                     |
 | `JWT_REFRESH_SECRET` | Yes      | Separate secret used to sign and verify refresh tokens. Use a different long random value. |
+| `RESEND_API_KEY`     | Production | Resend API key used by the mail provider.                                                |
+| `EMAIL_FROM`         | Production | Verified sender identity, such as `FastRep <noreply@fastrep.app>`.                       |
+| `PASSWORD_RESET_CODE_TTL_MINUTES` | No | Password-reset code lifetime; defaults to `15`.                               |
+| `PASSWORD_RESET_MAX_ATTEMPTS` | No | Incorrect attempts allowed per code; defaults to `5`.                                 |
+| `PASSWORD_RESET_RESEND_COOLDOWN_SECONDS` | No | Minimum delay between reset emails; defaults to `60`.                    |
 | `NODE_ENV`           | Yes      | Runtime environment. Use `production` for hosted deployments.                              |
 | `PORT`               | Production | HTTP port. Defaults to `3000` outside production.                                        |
 | `SWAGGER_ENABLED`    | Production | Exposes Swagger only when set to `true`.                                                 |
@@ -94,7 +100,8 @@ Production and CI deployments should apply committed migrations with `npx prisma
 
 Railway builds and starts the API from committed source; generated Prisma Client
 files are not committed. Configure Railway environment variables, including the
-Neon PostgreSQL connection string as `DATABASE_URL`, then use:
+Neon PostgreSQL connection string as `DATABASE_URL`, Resend credentials, the
+verified `EMAIL_FROM` sender, and the password-reset policy variables, then use:
 
 ```bash
 npm ci
@@ -133,6 +140,8 @@ Only authentication endpoints are currently implemented:
 - `POST /auth/login`
 - `POST /auth/refresh`
 - `POST /auth/logout`
+- `POST /auth/forgot-password`
+- `POST /auth/reset-password`
 - `GET /auth/me`
 
 See [Auth API](docs/api.md) for request and response examples.

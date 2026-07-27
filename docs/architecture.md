@@ -21,7 +21,8 @@ FastRep API is currently a NestJS modular monolith. The mobile client calls JSON
 - **Config** loads environment variables and rejects startup when required database or JWT settings are missing.
 - **Prisma** provides `PrismaService`, owns the Prisma Client lifecycle, and connects through the PostgreSQL adapter.
 - **Users** provides user lookup and mutation operations to other application services. It does not currently expose a controller.
-- **Auth** owns registration, login, refresh-token rotation, logout, access-token protection, and current-user retrieval.
+- **Auth** owns registration, login, refresh-token rotation, logout, password recovery, access-token protection, and current-user retrieval.
+- **Mail** isolates email delivery and templates from authentication business logic. Resend is the current provider.
 
 ## Registration request flow
 

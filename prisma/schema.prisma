@@ -19,8 +19,9 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  refreshTokens RefreshToken[]
-  reports       Report[]
+  refreshTokens         RefreshToken[]
+  passwordResetRequests PasswordResetRequest[]
+  reports               Report[]
 }
 
 model RefreshToken {
@@ -33,6 +34,22 @@ model RefreshToken {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+model PasswordResetRequest {
+  id           String    @id @default(uuid())
+  userId       String
+  codeHash     String
+  expiresAt    DateTime
+  attemptCount Int       @default(0)
+  usedAt       DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 enum ReportStatus {

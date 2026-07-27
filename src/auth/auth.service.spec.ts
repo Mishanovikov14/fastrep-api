@@ -1,8 +1,15 @@
-import { ConflictException, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  HttpException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as argon2 from 'argon2';
+import { randomUUID } from 'node:crypto';
 import { RefreshToken, User } from '../../generated/prisma/client';
+import { MailService } from '../mail/mail.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PublicUser } from '../users/user-select';
 import { UsersService } from '../users/users.service';
@@ -17,7 +24,31 @@ type RefreshTokenCreateArgs = {
 };
 
 type RefreshTokenWhereArgs = {
-  where: { id: string; userId?: string };
+  where: { id?: string; userId?: string };
+};
+
+type PasswordResetRequestRecord = {
+  id: string;
+  userId: string;
+  codeHash: string;
+  expiresAt: Date;
+  attemptCount: number;
+  usedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+type PasswordResetWhere = {
+  id?: string | { not: string };
+  userId?: string;
+  usedAt?: null;
+  expiresAt?: { gt: Date };
+  attemptCount?: number | { lt?: number; gte?: number };
+};
+
+type PasswordResetUpdateData = {
+  usedAt?: Date;
+  attemptCount?: { increment: number };
 };
 
 const toPublicUser = (user: User): PublicUser => {
@@ -39,6 +70,8 @@ describe('AuthService', () => {
     Pick<UsersService, 'findByEmail' | 'findById' | 'create'>
   >;
   let refreshTokens: Map<string, RefreshToken>;
+  let passwordResetRequests: Map<string, PasswordResetRequestRecord>;
+  let mailService: jest.Mocked<Pick<MailService, 'sendPasswordResetCode'>>;
   let user: User;
   let publicUser: PublicUser;
 
@@ -56,6 +89,10 @@ describe('AuthService', () => {
     };
     publicUser = toPublicUser(user);
     refreshTokens = new Map();
+    passwordResetRequests = new Map();
+    mailService = {
+      sendPasswordResetCode: jest.fn().mockResolvedValue(undefined),
+    };
 
     usersService = {
       findByEmail: jest.fn(),
@@ -73,21 +110,141 @@ describe('AuthService', () => {
         return Promise.resolve(refreshToken);
       }),
       deleteMany: jest.fn(({ where }: RefreshTokenWhereArgs) => {
-        const storedToken = refreshTokens.get(where.id);
-        const canDelete =
-          storedToken &&
-          (where.userId === undefined || storedToken.userId === where.userId);
+        let count = 0;
 
-        if (canDelete) {
-          refreshTokens.delete(where.id);
+        for (const [id, storedToken] of refreshTokens) {
+          const matchesId = where.id === undefined || id === where.id;
+          const matchesUser =
+            where.userId === undefined || storedToken.userId === where.userId;
+
+          if (matchesId && matchesUser) {
+            refreshTokens.delete(id);
+            count += 1;
+          }
         }
 
-        return Promise.resolve({ count: canDelete ? 1 : 0 });
+        return Promise.resolve({ count });
       }),
     };
-    const transactionClient = { refreshToken: refreshTokenDelegate };
+    const matchesPasswordResetWhere = (
+      request: PasswordResetRequestRecord,
+      where: PasswordResetWhere,
+    ): boolean => {
+      const matchesId =
+        where.id === undefined ||
+        (typeof where.id === 'string'
+          ? request.id === where.id
+          : request.id !== where.id.not);
+      const matchesUser =
+        where.userId === undefined || request.userId === where.userId;
+      const matchesUsed =
+        where.usedAt === undefined || request.usedAt === where.usedAt;
+      const matchesExpiry =
+        where.expiresAt === undefined || request.expiresAt > where.expiresAt.gt;
+      const matchesAttempts =
+        where.attemptCount === undefined ||
+        (typeof where.attemptCount === 'number'
+          ? request.attemptCount === where.attemptCount
+          : (where.attemptCount.lt === undefined ||
+              request.attemptCount < where.attemptCount.lt) &&
+            (where.attemptCount.gte === undefined ||
+              request.attemptCount >= where.attemptCount.gte));
+
+      return (
+        matchesId &&
+        matchesUser &&
+        matchesUsed &&
+        matchesExpiry &&
+        matchesAttempts
+      );
+    };
+    const passwordResetRequestDelegate = {
+      findFirst: jest.fn(({ where }: { where: PasswordResetWhere }) => {
+        const requests = [...passwordResetRequests.values()]
+          .filter((request) => matchesPasswordResetWhere(request, where))
+          .sort((left, right) => {
+            return right.createdAt.getTime() - left.createdAt.getTime();
+          });
+        return Promise.resolve(requests[0] ?? null);
+      }),
+      create: jest.fn(
+        ({
+          data,
+        }: {
+          data: Pick<
+            PasswordResetRequestRecord,
+            'userId' | 'codeHash' | 'expiresAt'
+          >;
+        }) => {
+          const now = new Date();
+          const request: PasswordResetRequestRecord = {
+            id: randomUUID(),
+            ...data,
+            attemptCount: 0,
+            usedAt: null,
+            createdAt: now,
+            updatedAt: now,
+          };
+          passwordResetRequests.set(request.id, request);
+          return Promise.resolve(request);
+        },
+      ),
+      updateMany: jest.fn(
+        ({
+          where,
+          data,
+        }: {
+          where: PasswordResetWhere;
+          data: PasswordResetUpdateData;
+        }) => {
+          let count = 0;
+
+          for (const request of passwordResetRequests.values()) {
+            if (!matchesPasswordResetWhere(request, where)) {
+              continue;
+            }
+
+            if (data.usedAt !== undefined) {
+              request.usedAt = data.usedAt;
+            }
+            if (data.attemptCount) {
+              request.attemptCount += data.attemptCount.increment;
+            }
+            request.updatedAt = new Date();
+            count += 1;
+          }
+
+          return Promise.resolve({ count });
+        },
+      ),
+    };
+    const userDelegate = {
+      update: jest.fn(
+        ({
+          where,
+          data,
+        }: {
+          where: { id: string };
+          data: { passwordHash: string };
+        }) => {
+          if (where.id !== user.id) {
+            throw new Error('User not found');
+          }
+          user.passwordHash = data.passwordHash;
+          user.updatedAt = new Date();
+          return Promise.resolve(user);
+        },
+      ),
+    };
+    const transactionClient = {
+      refreshToken: refreshTokenDelegate,
+      passwordResetRequest: passwordResetRequestDelegate,
+      user: userDelegate,
+    };
     const prisma = {
       refreshToken: refreshTokenDelegate,
+      passwordResetRequest: passwordResetRequestDelegate,
+      user: userDelegate,
       $transaction: jest.fn(
         (callback: (client: typeof transactionClient) => Promise<unknown>) =>
           callback(transactionClient),
@@ -96,6 +253,9 @@ describe('AuthService', () => {
     const configService = new ConfigService({
       JWT_ACCESS_SECRET: ACCESS_SECRET,
       JWT_REFRESH_SECRET: REFRESH_SECRET,
+      PASSWORD_RESET_CODE_TTL_MINUTES: '15',
+      PASSWORD_RESET_MAX_ATTEMPTS: '5',
+      PASSWORD_RESET_RESEND_COOLDOWN_SECONDS: '60',
     });
 
     authService = new AuthService(
@@ -103,6 +263,7 @@ describe('AuthService', () => {
       prisma,
       new JwtService(),
       configService,
+      mailService as unknown as MailService,
     );
   });
 
@@ -110,6 +271,32 @@ describe('AuthService', () => {
     usersService.findByEmail.mockResolvedValue(user);
     usersService.findById.mockResolvedValue(publicUser);
     return authService.login({ email: user.email, password: PASSWORD });
+  };
+
+  const requestPasswordReset = async (): Promise<string> => {
+    usersService.findByEmail.mockResolvedValue(user);
+    await authService.forgotPassword({
+      email: `  ${user.email.toUpperCase()} `,
+    });
+
+    return mailService.sendPasswordResetCode.mock.calls.at(-1)?.[1] ?? '';
+  };
+
+  const getLatestResetRequest = (): PasswordResetRequestRecord => {
+    const request = [...passwordResetRequests.values()].sort(
+      (left, right) => right.createdAt.getTime() - left.createdAt.getTime(),
+    )[0];
+
+    if (!request) {
+      throw new Error('Expected a password reset request');
+    }
+
+    return request;
+  };
+
+  const getDifferentCode = (code: string): string => {
+    const lastDigit = Number(code.at(-1));
+    return `${code.slice(0, -1)}${(lastDigit + 1) % 10}`;
   };
 
   it('registers a user with normalized email and the default language', async () => {
@@ -230,5 +417,175 @@ describe('AuthService', () => {
     await expect(authService.getMe(user.id)).rejects.toBeInstanceOf(
       UnauthorizedException,
     );
+  });
+
+  it('creates a reset request for an existing normalized email without storing the plaintext code', async () => {
+    const code = await requestPasswordReset();
+    const request = getLatestResetRequest();
+
+    expect(usersService.findByEmail).toHaveBeenCalledWith(user.email);
+    expect(code).toMatch(/^\d{6}$/);
+    expect(request.codeHash).not.toBe(code);
+    await expect(argon2.verify(request.codeHash, code)).resolves.toBe(true);
+    expect(mailService.sendPasswordResetCode).toHaveBeenCalledWith(
+      user.email,
+      code,
+      15,
+    );
+  });
+
+  it('returns identically for an unknown email without creating a request or sending mail', async () => {
+    usersService.findByEmail.mockResolvedValue(null);
+
+    await expect(
+      authService.forgotPassword({ email: 'missing@example.com' }),
+    ).resolves.toBeUndefined();
+    await expect(
+      authService.forgotPassword({ email: 'missing@example.com' }),
+    ).resolves.toBeUndefined();
+    expect(passwordResetRequests.size).toBe(0);
+    expect(mailService.sendPasswordResetCode).not.toHaveBeenCalled();
+  });
+
+  it('invalidates the previous code when a newer request is created', async () => {
+    await requestPasswordReset();
+    const firstRequest = getLatestResetRequest();
+    firstRequest.createdAt = new Date(Date.now() - 61_000);
+
+    await requestPasswordReset();
+    const latestRequest = getLatestResetRequest();
+
+    expect(passwordResetRequests.size).toBe(2);
+    expect(firstRequest.usedAt).toBeInstanceOf(Date);
+    expect(latestRequest.id).not.toBe(firstRequest.id);
+    expect(latestRequest.usedAt).toBeNull();
+  });
+
+  it('enforces the resend cooldown from the latest database request', async () => {
+    await requestPasswordReset();
+
+    const secondRequest = authService.forgotPassword({ email: user.email });
+
+    await expect(secondRequest).rejects.toMatchObject({
+      status: 429,
+    } satisfies Partial<HttpException>);
+    expect(passwordResetRequests.size).toBe(1);
+    expect(mailService.sendPasswordResetCode).toHaveBeenCalledTimes(1);
+  });
+
+  it('resets the password, consumes the code, and revokes all refresh sessions', async () => {
+    await login();
+    await login();
+    const code = await requestPasswordReset();
+
+    await authService.resetPassword({
+      email: user.email,
+      code,
+      newPassword: 'new-secure-password',
+    });
+
+    expect(refreshTokens.size).toBe(0);
+    expect(getLatestResetRequest().usedAt).toBeInstanceOf(Date);
+    await expect(argon2.verify(user.passwordHash, PASSWORD)).resolves.toBe(
+      false,
+    );
+    await expect(
+      argon2.verify(user.passwordHash, 'new-secure-password'),
+    ).resolves.toBe(true);
+    await expect(
+      authService.resetPassword({
+        email: user.email,
+        code,
+        newPassword: 'another-password',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects the old password and accepts the new password after reset', async () => {
+    const code = await requestPasswordReset();
+    await authService.resetPassword({
+      email: user.email,
+      code,
+      newPassword: 'new-secure-password',
+    });
+    usersService.findByEmail.mockResolvedValue(user);
+    usersService.findById.mockResolvedValue(publicUser);
+
+    await expect(
+      authService.login({ email: user.email, password: PASSWORD }),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    const result = await authService.login({
+      email: user.email,
+      password: 'new-secure-password',
+    });
+
+    expect(typeof result.accessToken).toBe('string');
+    expect(typeof result.refreshToken).toBe('string');
+  });
+
+  it('increments incorrect attempts and invalidates the code at the maximum', async () => {
+    const code = await requestPasswordReset();
+    const wrongCode = getDifferentCode(code);
+    const request = getLatestResetRequest();
+
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      await expect(
+        authService.resetPassword({
+          email: user.email,
+          code: wrongCode,
+          newPassword: 'new-secure-password',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(request.attemptCount).toBe(attempt);
+    }
+
+    expect(request.usedAt).toBeInstanceOf(Date);
+  });
+
+  it('rejects an expired code without changing the password', async () => {
+    const code = await requestPasswordReset();
+    getLatestResetRequest().expiresAt = new Date(Date.now() - 1);
+
+    await expect(
+      authService.resetPassword({
+        email: user.email,
+        code,
+        newPassword: 'new-secure-password',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(argon2.verify(user.passwordHash, PASSWORD)).resolves.toBe(
+      true,
+    );
+  });
+
+  it('allows only one concurrent reset to consume a code', async () => {
+    const code = await requestPasswordReset();
+    const reset = () =>
+      authService.resetPassword({
+        email: user.email,
+        code,
+        newPassword: 'new-secure-password',
+      });
+
+    const results = await Promise.allSettled([reset(), reset()]);
+
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === 'rejected'),
+    ).toHaveLength(1);
+  });
+
+  it('invalidates the reset request when mail delivery fails', async () => {
+    usersService.findByEmail.mockResolvedValue(user);
+    mailService.sendPasswordResetCode.mockRejectedValue(
+      new Error('provider failure'),
+    );
+
+    await expect(
+      authService.forgotPassword({ email: user.email }),
+    ).rejects.toMatchObject({ status: 503 });
+    expect(getLatestResetRequest().usedAt).toBeInstanceOf(Date);
   });
 });
