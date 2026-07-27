@@ -20,6 +20,7 @@ model User {
   updatedAt    DateTime @updatedAt
 
   refreshTokens RefreshToken[]
+  reports       Report[]
 }
 
 model RefreshToken {
@@ -32,4 +33,27 @@ model RefreshToken {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+enum ReportStatus {
+  DRAFT
+  PROCESSING
+  READY
+  FAILED
+}
+
+model Report {
+  id        String       @id @default(uuid())
+  userId    String
+  title     String
+  notes     String?
+  status    ReportStatus @default(DRAFT)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt(sort: Desc)])
 }
