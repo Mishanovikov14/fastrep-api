@@ -21,6 +21,7 @@ model User {
 
   refreshTokens         RefreshToken[]
   passwordResetRequests PasswordResetRequest[]
+  reports               Report[]
 }
 
 model RefreshToken {
@@ -49,5 +50,25 @@ model PasswordResetRequest {
 
   @@index([userId])
   @@index([expiresAt])
+}
+
+enum ReportStatus {
+  DRAFT
+  PROCESSING
+  READY
+  FAILED
+}
+
+model Report {
+  id        String       @id @default(uuid())
+  userId    String
+  title     String
+  notes     String?
+  status    ReportStatus @default(DRAFT)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@index([userId, createdAt(sort: Desc)])
 }
