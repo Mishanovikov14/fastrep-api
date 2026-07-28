@@ -19,3 +19,9 @@ export type TokenPair = {
 export type AuthenticationResult = TokenPair & {
   user: PublicUser;
 };
+
+export type RegistrationPendingResult = {
+  email: string;
+  verificationRequired: true;
+  resendAvailableInSeconds: number;
+};

@@ -1,6 +1,7 @@
 # Database
 
-FastRep currently uses PostgreSQL through Prisma. The authentication schema contains `User`, `RefreshToken`, and `PasswordResetRequest`; there are no report or media tables yet.
+FastRep uses PostgreSQL through Prisma. Authentication state includes `User`,
+`PendingRegistration`, `RefreshToken`, and `PasswordResetRequest`.
 
 ## User
 
@@ -13,6 +14,7 @@ FastRep currently uses PostgreSQL through Prisma. The authentication schema cont
 | `language`      | `String`         | Application language; database default is `en`. The registration API accepts `en`, `fr`, `es`, `uk`, and `de`. |
 | `photoUrl`      | `String?`        | Optional profile photo URL.                                                                                    |
 | `isPremium`     | `Boolean`        | Premium flag, defaulting to `false`. No subscription feature is currently implemented.                         |
+| `emailVerifiedAt` | `DateTime?`    | Time at which registration email verification completed. Existing users are backfilled during migration.       |
 | `createdAt`     | `DateTime`       | Creation timestamp, defaulting to the database insertion time.                                                 |
 | `updatedAt`     | `DateTime`       | Timestamp automatically updated by Prisma on changes.                                                          |
 | `refreshTokens` | `RefreshToken[]` | One-to-many relation to the user's active refresh-token records.                                               |
@@ -22,6 +24,19 @@ Passwords are one-way hashed with Argon2 before insertion. Authentication verifi
 The language column remains a plain string. API requests use the shared
 supported-language definition, and the data migration maps any legacy `ru`
 values to `en`.
+
+## PendingRegistration
+
+A pending registration stores normalized email, full name, language, Argon2id
+password and code hashes, code expiry, failed-attempt count, last-send time,
+and an absolute pending-registration expiry. No permanent `User` exists until
+the code is successfully verified.
+
+Email is unique so repeated registration requests update one pending record.
+Verification atomically consumes that record, creates the verified user, and
+creates the initial refresh session. Code expiry and total pending expiry are
+indexed for cleanup; expired records are also deleted lazily during normal
+requests. Plaintext passwords and verification codes are never stored.
 
 ## RefreshToken
 
@@ -56,7 +71,3 @@ npm run prisma:migrate
 ```
 
 Commit both the schema change and generated migration under `prisma/migrations`. Regenerate Prisma Client with `npm run prisma:generate`. Never edit generated files under `generated/prisma` manually.
-
-## Planned models
-
-Report and media models are planned but not implemented. Their fields, relations, storage lifecycle, and migrations will be designed in a separate feature.

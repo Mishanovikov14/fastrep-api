@@ -8,7 +8,13 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as argon2 from 'argon2';
 import { randomUUID } from 'node:crypto';
-import { RefreshToken, User } from '../../generated/prisma/client';
+import {
+  PendingRegistration,
+  Prisma,
+  RefreshToken,
+  User,
+} from '../../generated/prisma/client';
+import { SupportedLanguage } from '../common/enums/supported-language.enum';
 import { MailService } from '../mail/mail.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PublicUser } from '../users/user-select';
@@ -51,6 +57,30 @@ type PasswordResetUpdateData = {
   attemptCount?: { increment: number };
 };
 
+type PendingRegistrationWhere = {
+  id?: string;
+  email?: string;
+  codeHash?: string;
+  lastSentAt?: Date;
+  expiresAt?: { gt?: Date };
+  pendingExpiresAt?: { gt?: Date; lte?: Date };
+  attemptCount?: number | { lt?: number; gte?: number };
+};
+
+type PendingRegistrationUpdateData = Partial<
+  Pick<
+    PendingRegistration,
+    | 'fullName'
+    | 'passwordHash'
+    | 'language'
+    | 'codeHash'
+    | 'expiresAt'
+    | 'lastSentAt'
+  >
+> & {
+  attemptCount?: number | { increment: number };
+};
+
 const toPublicUser = (user: User): PublicUser => {
   return {
     id: user.id,
@@ -71,7 +101,16 @@ describe('AuthService', () => {
   >;
   let refreshTokens: Map<string, RefreshToken>;
   let passwordResetRequests: Map<string, PasswordResetRequestRecord>;
-  let mailService: jest.Mocked<Pick<MailService, 'sendPasswordResetCode'>>;
+  let pendingRegistrations: Map<string, PendingRegistration>;
+  let permanentUsers: Map<string, User>;
+  let failUserCreateWithUnique: boolean;
+  let transactionQueue: Promise<void>;
+  let mailService: jest.Mocked<
+    Pick<
+      MailService,
+      'sendPasswordResetCode' | 'sendRegistrationVerificationCode'
+    >
+  >;
   let user: User;
   let publicUser: PublicUser;
 
@@ -84,14 +123,20 @@ describe('AuthService', () => {
       language: 'en',
       photoUrl: null,
       isPremium: false,
+      emailVerifiedAt: new Date(),
       createdAt: new Date(),
       updatedAt: new Date(),
     };
     publicUser = toPublicUser(user);
     refreshTokens = new Map();
     passwordResetRequests = new Map();
+    pendingRegistrations = new Map();
+    permanentUsers = new Map();
+    failUserCreateWithUnique = false;
+    transactionQueue = Promise.resolve();
     mailService = {
       sendPasswordResetCode: jest.fn().mockResolvedValue(undefined),
+      sendRegistrationVerificationCode: jest.fn().mockResolvedValue(undefined),
     };
 
     usersService = {
@@ -218,7 +263,174 @@ describe('AuthService', () => {
         },
       ),
     };
+    const matchesPendingRegistrationWhere = (
+      pending: PendingRegistration,
+      where: PendingRegistrationWhere,
+    ): boolean => {
+      const matchesExpiry =
+        where.expiresAt === undefined ||
+        where.expiresAt.gt === undefined ||
+        pending.expiresAt > where.expiresAt.gt;
+      const matchesPendingExpiry =
+        where.pendingExpiresAt === undefined ||
+        ((where.pendingExpiresAt.gt === undefined ||
+          pending.pendingExpiresAt > where.pendingExpiresAt.gt) &&
+          (where.pendingExpiresAt.lte === undefined ||
+            pending.pendingExpiresAt <= where.pendingExpiresAt.lte));
+      const matchesAttempts =
+        where.attemptCount === undefined ||
+        (typeof where.attemptCount === 'number'
+          ? pending.attemptCount === where.attemptCount
+          : (where.attemptCount.lt === undefined ||
+              pending.attemptCount < where.attemptCount.lt) &&
+            (where.attemptCount.gte === undefined ||
+              pending.attemptCount >= where.attemptCount.gte));
+
+      return (
+        (where.id === undefined || pending.id === where.id) &&
+        (where.email === undefined || pending.email === where.email) &&
+        (where.codeHash === undefined || pending.codeHash === where.codeHash) &&
+        (where.lastSentAt === undefined ||
+          pending.lastSentAt.getTime() === where.lastSentAt.getTime()) &&
+        matchesExpiry &&
+        matchesPendingExpiry &&
+        matchesAttempts
+      );
+    };
+    const pendingRegistrationDelegate = {
+      findUnique: jest.fn(({ where }: { where: { email: string } }) =>
+        Promise.resolve(
+          [...pendingRegistrations.values()].find(
+            (pending) => pending.email === where.email,
+          ) ?? null,
+        ),
+      ),
+      create: jest.fn(
+        ({
+          data,
+        }: {
+          data: Omit<
+            PendingRegistration,
+            'id' | 'attemptCount' | 'createdAt' | 'updatedAt'
+          >;
+        }) => {
+          if (
+            [...pendingRegistrations.values()].some(
+              (pending) => pending.email === data.email,
+            )
+          ) {
+            throw new Prisma.PrismaClientKnownRequestError(
+              'Unique constraint failed',
+              {
+                code: 'P2002',
+                clientVersion: '7.8.0',
+              },
+            );
+          }
+
+          const createdAt = new Date();
+          const pending: PendingRegistration = {
+            id: randomUUID(),
+            ...data,
+            attemptCount: 0,
+            createdAt,
+            updatedAt: createdAt,
+          };
+          pendingRegistrations.set(pending.id, pending);
+          return Promise.resolve(pending);
+        },
+      ),
+      updateMany: jest.fn(
+        ({
+          where,
+          data,
+        }: {
+          where: PendingRegistrationWhere;
+          data: PendingRegistrationUpdateData;
+        }) => {
+          let count = 0;
+
+          for (const pending of pendingRegistrations.values()) {
+            if (!matchesPendingRegistrationWhere(pending, where)) {
+              continue;
+            }
+
+            Object.assign(pending, {
+              ...data,
+              attemptCount:
+                typeof data.attemptCount === 'object'
+                  ? pending.attemptCount + data.attemptCount.increment
+                  : (data.attemptCount ?? pending.attemptCount),
+              updatedAt: new Date(),
+            });
+            count += 1;
+          }
+
+          return Promise.resolve({ count });
+        },
+      ),
+      deleteMany: jest.fn(({ where }: { where: PendingRegistrationWhere }) => {
+        let count = 0;
+
+        for (const [id, pending] of pendingRegistrations) {
+          if (matchesPendingRegistrationWhere(pending, where)) {
+            pendingRegistrations.delete(id);
+            count += 1;
+          }
+        }
+
+        return Promise.resolve({ count });
+      }),
+    };
     const userDelegate = {
+      findUnique: jest.fn(({ where }: { where: { email: string } }) =>
+        Promise.resolve(permanentUsers.get(where.email) ?? null),
+      ),
+      create: jest.fn(
+        ({
+          data,
+        }: {
+          data: Pick<
+            User,
+            | 'id'
+            | 'email'
+            | 'fullName'
+            | 'passwordHash'
+            | 'language'
+            | 'emailVerifiedAt'
+          >;
+        }) => {
+          if (failUserCreateWithUnique || permanentUsers.has(data.email)) {
+            throw new Prisma.PrismaClientKnownRequestError(
+              'Unique constraint failed',
+              {
+                code: 'P2002',
+                clientVersion: '7.8.0',
+              },
+            );
+          }
+
+          const createdAt = new Date();
+          const createdUser: User = {
+            ...data,
+            photoUrl: null,
+            isPremium: false,
+            createdAt,
+            updatedAt: createdAt,
+          };
+          permanentUsers.set(createdUser.email, createdUser);
+          return Promise.resolve({
+            id: createdUser.id,
+            fullName: createdUser.fullName,
+            email: createdUser.email,
+            language: createdUser.language,
+            photoUrl: createdUser.photoUrl,
+            isPremium: createdUser.isPremium,
+            createdAt: createdUser.createdAt,
+            updatedAt: createdUser.updatedAt,
+          });
+        },
+      ),
       update: jest.fn(
         ({
           where,
@@ -239,15 +451,54 @@ describe('AuthService', () => {
     const transactionClient = {
       refreshToken: refreshTokenDelegate,
       passwordResetRequest: passwordResetRequestDelegate,
+      pendingRegistration: pendingRegistrationDelegate,
       user: userDelegate,
+    };
+    const runTransaction = async <T>(
+      callback: (client: typeof transactionClient) => Promise<T>,
+    ): Promise<T> => {
+      const refreshSnapshot = new Map(
+        [...refreshTokens].map(([id, token]) => [id, { ...token }]),
+      );
+      const resetSnapshot = new Map(
+        [...passwordResetRequests].map(([id, request]) => [id, { ...request }]),
+      );
+      const pendingSnapshot = new Map(
+        [...pendingRegistrations].map(([id, pending]) => [id, { ...pending }]),
+      );
+      const usersSnapshot = new Map(
+        [...permanentUsers].map(([email, storedUser]) => [
+          email,
+          { ...storedUser },
+        ]),
+      );
+      const userSnapshot = { ...user };
+
+      try {
+        return await callback(transactionClient);
+      } catch (error) {
+        refreshTokens = refreshSnapshot;
+        passwordResetRequests = resetSnapshot;
+        pendingRegistrations = pendingSnapshot;
+        permanentUsers = usersSnapshot;
+        Object.assign(user, userSnapshot);
+        throw error;
+      }
     };
     const prisma = {
       refreshToken: refreshTokenDelegate,
       passwordResetRequest: passwordResetRequestDelegate,
+      pendingRegistration: pendingRegistrationDelegate,
       user: userDelegate,
       $transaction: jest.fn(
-        (callback: (client: typeof transactionClient) => Promise<unknown>) =>
-          callback(transactionClient),
+        <T>(callback: (client: typeof transactionClient) => Promise<T>) => {
+          const result = transactionQueue.then(() => runTransaction(callback));
+          transactionQueue = result.then(
+            () => undefined,
+            () => undefined,
+          );
+          return result;
+        },
       ),
     } as unknown as PrismaService;
     const configService = new ConfigService({
@@ -256,6 +507,10 @@ describe('AuthService', () => {
       PASSWORD_RESET_CODE_TTL_MINUTES: '15',
       PASSWORD_RESET_MAX_ATTEMPTS: '5',
       PASSWORD_RESET_RESEND_COOLDOWN_SECONDS: '60',
+      REGISTRATION_CODE_TTL_MINUTES: '15',
+      REGISTRATION_MAX_ATTEMPTS: '5',
+      REGISTRATION_RESEND_COOLDOWN_SECONDS: '60',
+      PENDING_REGISTRATION_TTL_HOURS: '24',
     });
 
     authService = new AuthService(
@@ -299,35 +554,74 @@ describe('AuthService', () => {
     return `${code.slice(0, -1)}${(lastDigit + 1) % 10}`;
   };
 
-  it('registers a user with normalized email and the default language', async () => {
+  const beginRegistration = async (
+    overrides: Partial<{
+      fullName: string;
+      email: string;
+      password: string;
+      language: SupportedLanguage;
+    }> = {},
+  ): Promise<string> => {
     usersService.findByEmail.mockResolvedValue(null);
-    usersService.create.mockImplementation((data) =>
-      Promise.resolve({
-        ...publicUser,
-        fullName: data.fullName,
-        email: data.email,
-        language: data.language,
-      }),
+    await authService.register({
+      fullName: overrides.fullName ?? 'Fast Rep',
+      email: overrides.email ?? '  USER@Example.com ',
+      password: overrides.password ?? PASSWORD,
+      ...(overrides.language ? { language: overrides.language } : {}),
+    });
+
+    return (
+      mailService.sendRegistrationVerificationCode.mock.calls.at(-1)?.[1] ?? ''
     );
+  };
+
+  const getPendingRegistration = (): PendingRegistration => {
+    const pending = [...pendingRegistrations.values()][0];
+
+    if (!pending) {
+      throw new Error('Expected a pending registration');
+    }
+
+    return pending;
+  };
+
+  it('creates only a pending registration with hashed credentials and sends a code', async () => {
+    usersService.findByEmail.mockResolvedValue(null);
 
     const result = await authService.register({
       fullName: 'Fast Rep',
       email: '  USER@Example.com ',
       password: PASSWORD,
     });
+    const code =
+      mailService.sendRegistrationVerificationCode.mock.calls[0]?.[1] ?? '';
+    const pending = getPendingRegistration();
 
     expect(usersService.findByEmail).toHaveBeenCalledWith('user@example.com');
-    expect(usersService.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        email: 'user@example.com',
-        language: 'en',
-      }),
+    expect(usersService.create).not.toHaveBeenCalled();
+    expect(permanentUsers.size).toBe(0);
+    expect(refreshTokens.size).toBe(0);
+    expect(result).toEqual({
+      email: 'user@example.com',
+      verificationRequired: true,
+      resendAvailableInSeconds: 60,
+    });
+    expect(result).not.toHaveProperty('accessToken');
+    expect(result).not.toHaveProperty('refreshToken');
+    expect(pending.email).toBe('user@example.com');
+    expect(pending.language).toBe('en');
+    expect(pending.passwordHash).not.toBe(PASSWORD);
+    await expect(argon2.verify(pending.passwordHash, PASSWORD)).resolves.toBe(
+      true,
     );
-    expect(result.user).not.toHaveProperty('passwordHash');
-    expect(result.accessToken).toEqual(expect.any(String));
-    expect(result.refreshToken).toEqual(expect.any(String));
-    expect([...refreshTokens.values()][0]?.tokenHash).not.toBe(
-      result.refreshToken,
+    expect(code).toMatch(/^\d{6}$/);
+    expect(pending.codeHash).not.toBe(code);
+    await expect(argon2.verify(pending.codeHash, code)).resolves.toBe(true);
+    expect(mailService.sendRegistrationVerificationCode).toHaveBeenCalledWith(
+      'user@example.com',
+      code,
+      15,
+      SupportedLanguage.EN,
     );
   });
 
@@ -342,6 +636,268 @@ describe('AuthService', () => {
       }),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(usersService.create).not.toHaveBeenCalled();
+    expect(pendingRegistrations.size).toBe(0);
+    expect(mailService.sendRegistrationVerificationCode).not.toHaveBeenCalled();
+  });
+
+  it('does not let repeated registration bypass the database cooldown', async () => {
+    await beginRegistration();
+
+    try {
+      await beginRegistration();
+      throw new Error('Expected registration cooldown');
+    } catch (error) {
+      expect(error).toBeInstanceOf(HttpException);
+      const exception = error as HttpException;
+      expect(exception.getStatus()).toBe(429);
+      expect(exception.getResponse()).toEqual(
+        expect.objectContaining({
+          code: 'REGISTRATION_CODE_COOLDOWN',
+          retryAfterSeconds: 60,
+        }),
+      );
+    }
+    expect(pendingRegistrations.size).toBe(1);
+    expect(mailService.sendRegistrationVerificationCode).toHaveBeenCalledTimes(
+      1,
+    );
+  });
+
+  it('updates pending registration data after cooldown and invalidates the old code', async () => {
+    const oldCode = await beginRegistration();
+    const pending = getPendingRegistration();
+    const oldPasswordHash = pending.passwordHash;
+    pending.lastSentAt = new Date(Date.now() - 61_000);
+
+    const newCode = await beginRegistration({
+      fullName: 'Updated Name',
+      password: 'updated-password',
+      language: SupportedLanguage.UK,
+    });
+
+    expect(pendingRegistrations.size).toBe(1);
+    expect(pending.fullName).toBe('Updated Name');
+    expect(pending.language).toBe(SupportedLanguage.UK);
+    expect(pending.passwordHash).not.toBe(oldPasswordHash);
+    await expect(
+      argon2.verify(pending.passwordHash, 'updated-password'),
+    ).resolves.toBe(true);
+    await expect(argon2.verify(pending.codeHash, oldCode)).resolves.toBe(false);
+    await expect(argon2.verify(pending.codeHash, newCode)).resolves.toBe(true);
+  });
+
+  it('invalidates the pending code when registration email delivery fails', async () => {
+    usersService.findByEmail.mockResolvedValue(null);
+    mailService.sendRegistrationVerificationCode.mockRejectedValue(
+      new Error('provider failure'),
+    );
+
+    await expect(
+      authService.register({
+        fullName: user.fullName,
+        email: user.email,
+        password: PASSWORD,
+      }),
+    ).rejects.toMatchObject({ status: 503 });
+
+    expect(permanentUsers.size).toBe(0);
+    expect(refreshTokens.size).toBe(0);
+    expect(getPendingRegistration().attemptCount).toBe(5);
+    expect(getPendingRegistration().expiresAt.getTime()).toBeLessThanOrEqual(
+      Date.now(),
+    );
+  });
+
+  it('verifies the code, creates one verified user, consumes pending state, and returns tokens', async () => {
+    const code = await beginRegistration();
+    const storedPasswordHash = getPendingRegistration().passwordHash;
+
+    const result = await authService.verifyRegistration({
+      email: ' USER@example.com ',
+      code,
+    });
+    const createdUser = permanentUsers.get('user@example.com');
+
+    expect(createdUser).toBeDefined();
+    expect(createdUser?.emailVerifiedAt).toBeInstanceOf(Date);
+    expect(createdUser?.passwordHash).toBe(storedPasswordHash);
+    expect(permanentUsers.size).toBe(1);
+    expect(pendingRegistrations.size).toBe(0);
+    expect(refreshTokens.size).toBe(1);
+    expect(result.user.email).toBe('user@example.com');
+    expect(result.user).not.toHaveProperty('passwordHash');
+    expect(result.accessToken).toEqual(expect.any(String));
+    expect(result.refreshToken).toEqual(expect.any(String));
+    expect([...refreshTokens.values()][0]?.tokenHash).not.toBe(
+      result.refreshToken,
+    );
+  });
+
+  it('increments failed verification attempts and exhausts the code at five attempts', async () => {
+    const code = await beginRegistration();
+    const wrongCode = getDifferentCode(code);
+    const pending = getPendingRegistration();
+
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      await expect(
+        authService.verifyRegistration({
+          email: pending.email,
+          code: wrongCode,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(pending.attemptCount).toBe(attempt);
+    }
+
+    expect(pending.expiresAt.getTime()).toBeLessThanOrEqual(Date.now());
+    await expect(
+      authService.verifyRegistration({ email: pending.email, code }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(permanentUsers.size).toBe(0);
+  });
+
+  it('uses the same generic verification error for unknown and expired codes', async () => {
+    await expect(
+      authService.verifyRegistration({
+        email: 'missing@example.com',
+        code: '123456',
+      }),
+    ).rejects.toMatchObject({
+      message: 'Invalid or expired registration verification code',
+    });
+
+    const code = await beginRegistration();
+    getPendingRegistration().expiresAt = new Date(Date.now() - 1);
+
+    await expect(
+      authService.verifyRegistration({ email: user.email, code }),
+    ).rejects.toMatchObject({
+      message: 'Invalid or expired registration verification code',
+    });
+  });
+
+  it('deletes an expired pending registration and requires a fresh registration', async () => {
+    const code = await beginRegistration();
+    getPendingRegistration().pendingExpiresAt = new Date(Date.now() - 1);
+
+    await expect(
+      authService.verifyRegistration({ email: user.email, code }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(pendingRegistrations.size).toBe(0);
+    expect(permanentUsers.size).toBe(0);
+  });
+
+  it('allows only one concurrent verification to create the permanent user', async () => {
+    const code = await beginRegistration();
+    const verify = () =>
+      authService.verifyRegistration({ email: user.email, code });
+
+    const results = await Promise.allSettled([verify(), verify()]);
+
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === 'rejected'),
+    ).toHaveLength(1);
+    expect(permanentUsers.size).toBe(1);
+    expect(refreshTokens.size).toBe(1);
+  });
+
+  it('handles a unique-email race as a controlled conflict', async () => {
+    const code = await beginRegistration();
+    failUserCreateWithUnique = true;
+
+    await expect(
+      authService.verifyRegistration({ email: user.email, code }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(permanentUsers.size).toBe(0);
+    expect(pendingRegistrations.size).toBe(1);
+    expect(refreshTokens.size).toBe(0);
+  });
+
+  it('returns generic no-content behavior for unknown and permanent resend emails', async () => {
+    usersService.findByEmail.mockResolvedValue(null);
+    await expect(
+      authService.resendRegistrationCode({
+        email: 'missing@example.com',
+      }),
+    ).resolves.toBeUndefined();
+
+    usersService.findByEmail.mockResolvedValue(user);
+    await expect(
+      authService.resendRegistrationCode({ email: user.email }),
+    ).resolves.toBeUndefined();
+
+    expect(mailService.sendRegistrationVerificationCode).not.toHaveBeenCalled();
+  });
+
+  it('enforces resend cooldown with a stable code and accurate retry value', async () => {
+    await beginRegistration();
+    const pending = getPendingRegistration();
+    pending.lastSentAt = new Date(Date.now() - 20_000);
+    usersService.findByEmail.mockResolvedValue(null);
+
+    try {
+      await authService.resendRegistrationCode({ email: pending.email });
+      throw new Error('Expected registration cooldown');
+    } catch (error) {
+      expect(error).toBeInstanceOf(HttpException);
+      const exception = error as HttpException;
+      expect(exception.getStatus()).toBe(429);
+      expect(exception.getResponse()).toEqual(
+        expect.objectContaining({
+          code: 'REGISTRATION_CODE_COOLDOWN',
+          retryAfterSeconds: 40,
+        }),
+      );
+    }
+  });
+
+  it('resends after cooldown, invalidates the old code, and resets attempts', async () => {
+    const oldCode = await beginRegistration();
+    const pending = getPendingRegistration();
+    pending.lastSentAt = new Date(Date.now() - 61_000);
+    pending.attemptCount = 3;
+    usersService.findByEmail.mockResolvedValue(null);
+
+    await authService.resendRegistrationCode({ email: pending.email });
+    const newCode =
+      mailService.sendRegistrationVerificationCode.mock.calls.at(-1)?.[1] ?? '';
+
+    expect(pending.attemptCount).toBe(0);
+    await expect(argon2.verify(pending.codeHash, oldCode)).resolves.toBe(false);
+    await expect(argon2.verify(pending.codeHash, newCode)).resolves.toBe(true);
+  });
+
+  it('makes a newly generated resend code unusable when delivery fails', async () => {
+    await beginRegistration();
+    const pending = getPendingRegistration();
+    pending.lastSentAt = new Date(Date.now() - 61_000);
+    usersService.findByEmail.mockResolvedValue(null);
+    mailService.sendRegistrationVerificationCode.mockRejectedValueOnce(
+      new Error('provider failure'),
+    );
+
+    await expect(
+      authService.resendRegistrationCode({ email: pending.email }),
+    ).rejects.toMatchObject({ status: 503 });
+    expect(pending.attemptCount).toBe(5);
+    expect(pending.expiresAt.getTime()).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('does not let a pending registration log in or request password recovery', async () => {
+    await beginRegistration();
+    usersService.findByEmail.mockResolvedValue(null);
+
+    await expect(
+      authService.login({ email: user.email, password: PASSWORD }),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    await expect(
+      authService.forgotPassword({ email: user.email }),
+    ).resolves.toBeUndefined();
+
+    expect(passwordResetRequests.size).toBe(0);
+    expect(mailService.sendPasswordResetCode).not.toHaveBeenCalled();
   });
 
   it('logs in with valid credentials', async () => {
