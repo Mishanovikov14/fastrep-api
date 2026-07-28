@@ -17,6 +17,11 @@ import { AuthService } from './auth.service';
         ttl: 60_000,
         limit: 10,
       },
+      {
+        name: 'registration',
+        ttl: 60_000,
+        limit: 10,
+      },
     ]),
     MailModule,
     PrismaModule,

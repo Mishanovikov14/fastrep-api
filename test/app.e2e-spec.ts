@@ -4,7 +4,11 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { App } from 'supertest/types';
-import { RefreshToken, User } from '../generated/prisma/client';
+import {
+  PendingRegistration,
+  RefreshToken,
+  User,
+} from '../generated/prisma/client';
 import { AuthModule } from '../src/auth/auth.module';
 import { SupportedLanguage } from '../src/common/enums/supported-language.enum';
 import { MailService } from '../src/mail/mail.service';
@@ -16,7 +20,15 @@ type UserFindArgs = {
 };
 
 type UserCreateArgs = {
-  data: Pick<User, 'fullName' | 'email' | 'passwordHash' | 'language'>;
+  data: Pick<
+    User,
+    | 'id'
+    | 'fullName'
+    | 'email'
+    | 'passwordHash'
+    | 'language'
+    | 'emailVerifiedAt'
+  >;
   select?: Record<string, boolean>;
 };
 
@@ -42,6 +54,7 @@ type PasswordResetRequestRecord = {
 class InMemoryPrismaService {
   readonly users = new Map<string, User>();
   readonly refreshTokens = new Map<string, RefreshToken>();
+  readonly pendingRegistrations = new Map<string, PendingRegistration>();
   readonly passwordResetRequests = new Map<
     string,
     PasswordResetRequestRecord
@@ -65,7 +78,6 @@ class InMemoryPrismaService {
 
       const now = new Date();
       const user: User = {
-        id: randomUUID(),
         ...data,
         photoUrl: null,
         isPremium: false,
@@ -91,6 +103,96 @@ class InMemoryPrismaService {
       user.passwordHash = data.passwordHash;
       user.updatedAt = new Date();
       return Promise.resolve({ ...user });
+    },
+  };
+
+  readonly pendingRegistration = {
+    findUnique: ({ where }: { where: { email: string } }) =>
+      Promise.resolve(
+        [...this.pendingRegistrations.values()].find(
+          (item) => item.email === where.email,
+        ) ?? null,
+      ),
+    create: ({
+      data,
+    }: {
+      data: Pick<
+        PendingRegistration,
+        | 'email'
+        | 'fullName'
+        | 'passwordHash'
+        | 'language'
+        | 'codeHash'
+        | 'expiresAt'
+        | 'lastSentAt'
+        | 'pendingExpiresAt'
+      >;
+      select?: { id: true };
+    }) => {
+      const now = new Date();
+      const pending: PendingRegistration = {
+        id: randomUUID(),
+        ...data,
+        attemptCount: 0,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.pendingRegistrations.set(pending.id, pending);
+      return Promise.resolve({ id: pending.id });
+    },
+    updateMany: ({
+      where,
+      data,
+    }: {
+      where: {
+        id: string;
+        email?: string;
+        codeHash?: string;
+        lastSentAt?: Date;
+        expiresAt?: { gt: Date };
+        pendingExpiresAt?: { gt?: Date; lte?: Date };
+        attemptCount?: number | { lt: number };
+      };
+      data: Partial<PendingRegistration> & {
+        attemptCount?: number | { increment: number };
+      };
+    }) => {
+      const pending = this.pendingRegistrations.get(where.id);
+
+      if (!pending || !this.matchesPending(pending, where)) {
+        return Promise.resolve({ count: 0 });
+      }
+
+      for (const [key, value] of Object.entries(data)) {
+        if (key === 'attemptCount' && typeof value === 'object') {
+          pending.attemptCount += value.increment;
+        } else {
+          Object.assign(pending, { [key]: value });
+        }
+      }
+      pending.updatedAt = new Date();
+      return Promise.resolve({ count: 1 });
+    },
+    deleteMany: ({
+      where,
+    }: {
+      where: {
+        id: string;
+        email?: string;
+        codeHash?: string;
+        expiresAt?: { gt: Date };
+        pendingExpiresAt?: { gt?: Date; lte?: Date };
+        attemptCount?: { lt: number };
+      };
+    }) => {
+      const pending = this.pendingRegistrations.get(where.id);
+
+      if (!pending || !this.matchesPending(pending, where)) {
+        return Promise.resolve({ count: 0 });
+      }
+
+      this.pendingRegistrations.delete(pending.id);
+      return Promise.resolve({ count: 1 });
     },
   };
 
@@ -231,6 +333,35 @@ class InMemoryPrismaService {
       Object.entries(user).filter(([key]) => select[key]),
     );
   }
+
+  private matchesPending(
+    pending: PendingRegistration,
+    where: {
+      email?: string;
+      codeHash?: string;
+      lastSentAt?: Date;
+      expiresAt?: { gt: Date };
+      pendingExpiresAt?: { gt?: Date; lte?: Date };
+      attemptCount?: number | { lt: number };
+    },
+  ): boolean {
+    return (
+      (where.email === undefined || pending.email === where.email) &&
+      (where.codeHash === undefined || pending.codeHash === where.codeHash) &&
+      (where.lastSentAt === undefined ||
+        pending.lastSentAt.getTime() === where.lastSentAt.getTime()) &&
+      (where.expiresAt === undefined ||
+        pending.expiresAt > where.expiresAt.gt) &&
+      (where.pendingExpiresAt?.gt === undefined ||
+        pending.pendingExpiresAt > where.pendingExpiresAt.gt) &&
+      (where.pendingExpiresAt?.lte === undefined ||
+        pending.pendingExpiresAt <= where.pendingExpiresAt.lte) &&
+      (where.attemptCount === undefined ||
+        (typeof where.attemptCount === 'number'
+          ? pending.attemptCount === where.attemptCount
+          : pending.attemptCount < where.attemptCount.lt))
+    );
+  }
 }
 
 const validRegistration = {
@@ -259,15 +390,27 @@ type ValidationErrorBody = {
   message: unknown[];
 };
 
+type RegistrationPendingBody = {
+  email: string;
+  verificationRequired: boolean;
+  resendAvailableInSeconds: number;
+};
+
 describe('Authentication (e2e)', () => {
   let app: INestApplication<App>;
   let prisma: InMemoryPrismaService;
-  let mailService: jest.Mocked<Pick<MailService, 'sendPasswordResetCode'>>;
+  let mailService: jest.Mocked<
+    Pick<
+      MailService,
+      'sendPasswordResetCode' | 'sendRegistrationVerificationCode'
+    >
+  >;
 
   beforeEach(async () => {
     prisma = new InMemoryPrismaService();
     mailService = {
       sendPasswordResetCode: jest.fn().mockResolvedValue(undefined),
+      sendRegistrationVerificationCode: jest.fn().mockResolvedValue(undefined),
     };
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [
@@ -281,6 +424,10 @@ describe('Authentication (e2e)', () => {
               PASSWORD_RESET_CODE_TTL_MINUTES: '15',
               PASSWORD_RESET_MAX_ATTEMPTS: '5',
               PASSWORD_RESET_RESEND_COOLDOWN_SECONDS: '60',
+              REGISTRATION_CODE_TTL_MINUTES: '15',
+              REGISTRATION_MAX_ATTEMPTS: '5',
+              REGISTRATION_RESEND_COOLDOWN_SECONDS: '60',
+              PENDING_REGISTRATION_TTL_HOURS: '24',
             }),
           ],
         }),
@@ -308,28 +455,49 @@ describe('Authentication (e2e)', () => {
     await app.close();
   });
 
-  it('POST /auth/register defaults an omitted language to en', async () => {
+  const registerAndVerify = async (
+    registration: typeof validRegistration = validRegistration,
+  ): Promise<AuthResponseBody> => {
+    await request(app.getHttpServer())
+      .post('/auth/register')
+      .send(registration)
+      .expect(201);
+    const code =
+      mailService.sendRegistrationVerificationCode.mock.calls.at(-1)?.[1];
+
+    expect(code).toMatch(/^\d{6}$/);
+    const response = await request(app.getHttpServer())
+      .post('/auth/verify-registration')
+      .send({ email: registration.email, code })
+      .expect(200);
+
+    const responseBody: unknown = response.body;
+    return responseBody as AuthResponseBody;
+  };
+
+  it('POST /auth/register creates only a pending registration', async () => {
     const response = await request(app.getHttpServer())
       .post('/auth/register')
       .send(validRegistration)
       .expect(201);
-    const body = response.body as unknown as AuthResponseBody;
+    const body = response.body as unknown as RegistrationPendingBody;
 
-    expect(body.user).toMatchObject({
-      fullName: validRegistration.fullName,
+    expect(body).toEqual({
       email: validRegistration.email,
-      language: 'en',
+      verificationRequired: true,
+      resendAvailableInSeconds: 60,
     });
-    expect(body.user).not.toHaveProperty('passwordHash');
-    expect(body.user).not.toHaveProperty('tokenHash');
-    expect(body.accessToken).toEqual(expect.any(String));
-    expect(body.refreshToken).toEqual(expect.any(String));
+    expect(prisma.users.size).toBe(0);
+    expect([...prisma.pendingRegistrations.values()][0]?.language).toBe('en');
+    expect(mailService.sendRegistrationVerificationCode).toHaveBeenCalledTimes(
+      1,
+    );
   });
 
   it.each(Object.values(SupportedLanguage))(
     'POST /auth/register accepts supported language %s',
     async (language) => {
-      const response = await request(app.getHttpServer())
+      await request(app.getHttpServer())
         .post('/auth/register')
         .send({
           ...validRegistration,
@@ -337,11 +505,11 @@ describe('Authentication (e2e)', () => {
           language,
         })
         .expect(201);
-      const body = response.body as unknown as AuthResponseBody;
-
-      expect(body.user.language).toBe(language);
-      expect(body.user).not.toHaveProperty('passwordHash');
-      expect(body.user).not.toHaveProperty('tokenHash');
+      expect(
+        [...prisma.pendingRegistrations.values()].find(
+          (pending) => pending.language === String(language),
+        ),
+      ).toBeDefined();
     },
   );
 
@@ -360,10 +528,7 @@ describe('Authentication (e2e)', () => {
   );
 
   it('POST /auth/login authenticates valid credentials', async () => {
-    await request(app.getHttpServer())
-      .post('/auth/register')
-      .send(validRegistration)
-      .expect(201);
+    await registerAndVerify();
 
     const response = await request(app.getHttpServer())
       .post('/auth/login')
@@ -380,11 +545,7 @@ describe('Authentication (e2e)', () => {
   });
 
   it('POST /auth/refresh rotates a valid refresh token', async () => {
-    const registration = await request(app.getHttpServer())
-      .post('/auth/register')
-      .send(validRegistration)
-      .expect(201);
-    const registrationBody = registration.body as unknown as AuthResponseBody;
+    const registrationBody = await registerAndVerify();
 
     const response = await request(app.getHttpServer())
       .post('/auth/refresh')
@@ -401,11 +562,7 @@ describe('Authentication (e2e)', () => {
   });
 
   it('POST /auth/logout is idempotent', async () => {
-    const registration = await request(app.getHttpServer())
-      .post('/auth/register')
-      .send(validRegistration)
-      .expect(201);
-    const registrationBody = registration.body as unknown as AuthResponseBody;
+    const registrationBody = await registerAndVerify();
     const body = { refreshToken: registrationBody.refreshToken };
 
     await request(app.getHttpServer())
@@ -419,11 +576,7 @@ describe('Authentication (e2e)', () => {
   });
 
   it('GET /auth/me returns the authenticated user', async () => {
-    const registration = await request(app.getHttpServer())
-      .post('/auth/register')
-      .send(validRegistration)
-      .expect(201);
-    const registrationBody = registration.body as unknown as AuthResponseBody;
+    const registrationBody = await registerAndVerify();
 
     const response = await request(app.getHttpServer())
       .get('/auth/me')
@@ -436,10 +589,7 @@ describe('Authentication (e2e)', () => {
   });
 
   it('password recovery does not disclose account existence and returns no secrets', async () => {
-    await request(app.getHttpServer())
-      .post('/auth/register')
-      .send(validRegistration)
-      .expect(201);
+    await registerAndVerify();
 
     const existingResponse = await request(app.getHttpServer())
       .post('/auth/forgot-password')
@@ -459,11 +609,7 @@ describe('Authentication (e2e)', () => {
   });
 
   it('resets the password without returning tokens and requires a new login', async () => {
-    const registration = await request(app.getHttpServer())
-      .post('/auth/register')
-      .send(validRegistration)
-      .expect(201);
-    const registrationBody = registration.body as unknown as AuthResponseBody;
+    const registrationBody = await registerAndVerify();
 
     await request(app.getHttpServer())
       .post('/auth/forgot-password')
