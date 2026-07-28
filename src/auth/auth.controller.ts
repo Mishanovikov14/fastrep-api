@@ -28,9 +28,13 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { RegisterDto } from './dto/register.dto';
+import { ResendRegistrationCodeDto } from './dto/resend-registration-code.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { VerifyRegistrationDto } from './dto/verify-registration.dto';
 import { AuthenticationResponseDto } from './dto/responses/authentication-response.dto';
 import { PublicUserResponseDto } from './dto/responses/public-user-response.dto';
+import { RegistrationCooldownResponseDto } from './dto/responses/registration-cooldown-response.dto';
+import { RegistrationPendingResponseDto } from './dto/responses/registration-pending-response.dto';
 import { TokenPairResponseDto } from './dto/responses/token-pair-response.dto';
 
 @ApiTags('Authentication')
@@ -38,16 +42,84 @@ import { TokenPairResponseDto } from './dto/responses/token-pair-response.dto';
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
-  @ApiOperation({ summary: 'Register a new user' })
+  @ApiOperation({
+    summary: 'Start a pending registration',
+    description:
+      'Creates a pending registration and emails its verification code when the normalized email is new. An existing unexpired pending registration is returned unchanged without resending. No permanent user or authentication tokens are created until verification succeeds.',
+  })
   @ApiCreatedResponse({
-    description: 'User registered successfully.',
-    type: AuthenticationResponseDto,
+    description: 'Verification is required before the account is created.',
+    type: RegistrationPendingResponseDto,
   })
   @ApiBadRequestResponse({ description: 'Invalid registration data.' })
   @ApiConflictResponse({ description: 'Email already exists.' })
+  @ApiTooManyRequestsResponse({
+    description: 'IP rate limit exceeded.',
+  })
+  @ApiServiceUnavailableResponse({
+    description: 'Registration email delivery is temporarily unavailable.',
+  })
+  @Throttle({ registration: { limit: 5, ttl: 60_000 } })
+  @UseGuards(ThrottlerGuard)
   @Post('register')
-  register(@Body() dto: RegisterDto) {
+  register(@Body() dto: RegisterDto): ReturnType<AuthService['register']> {
     return this.authService.register(dto);
+  }
+
+  @ApiOperation({
+    summary: 'Verify a pending registration',
+    description:
+      'Atomically creates the permanent verified user, consumes the pending registration, and returns the normal authentication response.',
+  })
+  @ApiOkResponse({
+    description: 'Email verified and account created successfully.',
+    type: AuthenticationResponseDto,
+  })
+  @ApiBadRequestResponse({
+    description:
+      'Invalid request data or an invalid, expired, consumed, or exhausted code.',
+  })
+  @ApiConflictResponse({
+    description: 'A permanent account with this email already exists.',
+  })
+  @ApiTooManyRequestsResponse({
+    description: 'IP rate limit exceeded.',
+  })
+  @Throttle({ registration: { limit: 10, ttl: 60_000 } })
+  @UseGuards(ThrottlerGuard)
+  @HttpCode(HttpStatus.OK)
+  @Post('verify-registration')
+  verifyRegistration(
+    @Body() dto: VerifyRegistrationDto,
+  ): ReturnType<AuthService['verifyRegistration']> {
+    return this.authService.verifyRegistration(dto);
+  }
+
+  @ApiOperation({
+    summary: 'Resend a pending registration code',
+    description:
+      'The dedicated operation for replacing and emailing a pending registration code. Returns the same empty response for unknown and already-registered emails. Expired pending registrations require a fresh registration request.',
+  })
+  @ApiNoContentResponse({
+    description:
+      'The request was accepted. Registration existence is never disclosed.',
+  })
+  @ApiBadRequestResponse({ description: 'Invalid email.' })
+  @ApiTooManyRequestsResponse({
+    description: 'IP rate limit or per-email resend cooldown exceeded.',
+    type: RegistrationCooldownResponseDto,
+  })
+  @ApiServiceUnavailableResponse({
+    description: 'Registration email delivery is temporarily unavailable.',
+  })
+  @Throttle({ registration: { limit: 5, ttl: 60_000 } })
+  @UseGuards(ThrottlerGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @Post('resend-registration-code')
+  resendRegistrationCode(
+    @Body() dto: ResendRegistrationCodeDto,
+  ): Promise<void> {
+    return this.authService.resendRegistrationCode(dto);
   }
 
   @ApiOperation({ summary: 'Log in with email and password' })

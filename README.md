@@ -9,8 +9,8 @@ The repository currently includes:
 - a NestJS modular monolith;
 - PostgreSQL running locally through Docker Compose;
 - Prisma schema, migrations, and generated client integration;
-- `User`, `RefreshToken`, and `PasswordResetRequest` models;
-- registration, login, token refresh, logout, current-user, and email password-recovery endpoints;
+- `User`, `PendingRegistration`, `RefreshToken`, `PasswordResetRequest`, and `Report` models;
+- verified-email registration, login, token refresh, logout, current-user, password-recovery, and Reports endpoints;
 - Argon2 password and refresh-token hashing;
 - Resend email delivery behind a generic mail abstraction;
 - DTO validation, unit tests, E2E tests, and lightweight CI.
@@ -68,6 +68,10 @@ The API listens on `http://localhost:3000` by default. The Docker Compose servic
 | `PASSWORD_RESET_CODE_TTL_MINUTES` | No | Password-reset code lifetime; defaults to `15`.                               |
 | `PASSWORD_RESET_MAX_ATTEMPTS` | No | Incorrect attempts allowed per code; defaults to `5`.                                 |
 | `PASSWORD_RESET_RESEND_COOLDOWN_SECONDS` | No | Minimum delay between reset emails; defaults to `60`.                    |
+| `REGISTRATION_CODE_TTL_MINUTES` | No | Registration verification-code lifetime; defaults to `15`.                         |
+| `REGISTRATION_MAX_ATTEMPTS` | No | Incorrect registration-code attempts allowed; defaults to `5`.                         |
+| `REGISTRATION_RESEND_COOLDOWN_SECONDS` | No | Minimum delay between registration emails; defaults to `60`. In production it cannot be lower than `60`. |
+| `PENDING_REGISTRATION_TTL_HOURS` | No | Maximum lifetime of a pending registration; defaults to `24`.                       |
 | `NODE_ENV`           | Yes      | Runtime environment. Use `production` for hosted deployments.                              |
 | `PORT`               | Production | HTTP port. Defaults to `3000` outside production.                                        |
 | `SWAGGER_ENABLED`    | Production | Exposes Swagger only when set to `true`.                                                 |
@@ -101,7 +105,8 @@ Production and CI deployments should apply committed migrations with `npx prisma
 Railway builds and starts the API from committed source; generated Prisma Client
 files are not committed. Configure Railway environment variables, including the
 Neon PostgreSQL connection string as `DATABASE_URL`, Resend credentials, the
-verified `EMAIL_FROM` sender, and the password-reset policy variables, then use:
+verified `EMAIL_FROM` sender, and the registration and password-reset policy
+variables, then use:
 
 ```bash
 npm ci
@@ -134,9 +139,11 @@ npm run verify
 
 ## Current API scope
 
-Only authentication endpoints are currently implemented:
+Authentication includes:
 
 - `POST /auth/register`
+- `POST /auth/verify-registration`
+- `POST /auth/resend-registration-code`
 - `POST /auth/login`
 - `POST /auth/refresh`
 - `POST /auth/logout`
@@ -148,6 +155,10 @@ See [Auth API](docs/api.md) for request and response examples.
 
 Supported user language codes are `en`, `fr`, `es`, `uk`, and `de`. The
 default is `en`.
+
+Registration creates pending state only for a new email. Repeating registration
+returns an unexpired pending registration unchanged; clients use
+`POST /auth/resend-registration-code` when they need a replacement code.
 
 ## Project documentation
 

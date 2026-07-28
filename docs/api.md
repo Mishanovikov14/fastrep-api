@@ -1,6 +1,6 @@
 # Authentication API
 
-The current API exposes authentication endpoints only. Request and response bodies use JSON.
+Request and response bodies use JSON.
 
 Swagger is exposed only when `SWAGGER_ENABLED=true`.
 
@@ -21,11 +21,15 @@ default is `en`.
 
 ## POST /auth/register
 
-Creates a user and signs the new user in.
+Starts a pending registration and emails a six-digit verification code when the
+normalized email is new. It does not create a `User` or issue tokens.
 
 - Authentication: not required
 - Success: `201 Created`
-- Important errors: `400 Bad Request` for DTO validation; `409 Conflict` when the email already exists
+- Important errors: `400 Bad Request` for DTO validation; `409 Conflict` when a
+  permanent user already has the email; `429 Too Many Requests` for IP
+  throttling; `503 Service Unavailable` when registration or email delivery is
+  temporarily unavailable
 
 Request body:
 
@@ -49,20 +53,59 @@ Successful response:
 
 ```json
 {
-  "user": {
-    "id": "2f17b869-984d-42df-a306-d23d930829a1",
-    "fullName": "Alex Morgan",
-    "email": "alex@example.com",
-    "language": "uk",
-    "photoUrl": null,
-    "isPremium": false,
-    "createdAt": "2026-07-16T12:00:00.000Z",
-    "updatedAt": "2026-07-16T12:00:00.000Z"
-  },
-  "accessToken": "<access-token>",
-  "refreshToken": "<refresh-token>"
+  "email": "alex@example.com",
+  "verificationRequired": true,
+  "resendAvailableInSeconds": 60
 }
 ```
+
+Submitting registration again for an unexpired pending email returns the same
+response without changing its password hash, profile data, code, attempts, or
+expiry, and without sending another email. `resendAvailableInSeconds` is
+calculated from the stored `lastSentAt`; use the dedicated resend endpoint when
+it reaches zero. A pending registration past its total lifetime is deleted and
+the registration request starts a completely fresh pending registration.
+
+## POST /auth/verify-registration
+
+Consumes a valid six-digit registration code. User creation, pending-record
+consumption, and initial refresh-session creation are atomic.
+
+- Authentication: not required
+- Success: `200 OK`, with the same user and token shape returned by login
+- Important errors: `400 Bad Request` for an unknown, invalid, expired, or
+  exhausted code; `409 Conflict` if another request already created the user
+
+```json
+{
+  "email": "alex@example.com",
+  "code": "123456"
+}
+```
+
+Failed attempts are limited. Expired pending registrations are removed lazily.
+
+## POST /auth/resend-registration-code
+
+This is the only endpoint that issues a replacement code for an unexpired
+pending registration. It invalidates the old code, resets failed attempts,
+updates code expiry and `lastSentAt`, and sends another email.
+
+- Authentication: not required
+- Success: `204 No Content`
+- Account privacy: unknown and already-registered emails also return `204`
+- Important errors: `429 Too Many Requests` during the database-backed
+  cooldown; `503 Service Unavailable` when registration or email delivery is
+  temporarily unavailable
+
+```json
+{
+  "email": "alex@example.com"
+}
+```
+
+Cooldown responses include the stable code
+`REGISTRATION_CODE_COOLDOWN` and `retryAfterSeconds`.
 
 ## POST /auth/login
 

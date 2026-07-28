@@ -16,6 +16,7 @@ model User {
   language     String   @default("en")
   photoUrl     String?
   isPremium    Boolean  @default(false)
+  emailVerifiedAt DateTime?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -34,6 +35,24 @@ model RefreshToken {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+model PendingRegistration {
+  id               String   @id @default(uuid())
+  email            String   @unique
+  passwordHash     String
+  fullName         String
+  language         String   @default("en")
+  codeHash         String
+  expiresAt        DateTime
+  attemptCount     Int      @default(0)
+  lastSentAt       DateTime
+  pendingExpiresAt DateTime
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([expiresAt])
+  @@index([pendingExpiresAt])
 }
 
 model PasswordResetRequest {
