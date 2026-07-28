@@ -640,50 +640,79 @@ describe('AuthService', () => {
     expect(mailService.sendRegistrationVerificationCode).not.toHaveBeenCalled();
   });
 
-  it('does not let repeated registration bypass the database cooldown', async () => {
+  it('returns an existing pending registration without overwriting data or sending email', async () => {
     await beginRegistration();
+    const pending = getPendingRegistration();
+    const original = { ...pending };
 
-    try {
-      await beginRegistration();
-      throw new Error('Expected registration cooldown');
-    } catch (error) {
-      expect(error).toBeInstanceOf(HttpException);
-      const exception = error as HttpException;
-      expect(exception.getStatus()).toBe(429);
-      expect(exception.getResponse()).toEqual(
-        expect.objectContaining({
-          code: 'REGISTRATION_CODE_COOLDOWN',
-          retryAfterSeconds: 60,
-        }),
-      );
-    }
+    const result = await authService.register({
+      fullName: 'Replacement Name',
+      email: pending.email,
+      password: 'replacement-password',
+      language: SupportedLanguage.UK,
+    });
+
+    expect(result).toEqual({
+      email: pending.email,
+      verificationRequired: true,
+      resendAvailableInSeconds: 60,
+    });
     expect(pendingRegistrations.size).toBe(1);
+    expect(pending.passwordHash).toBe(original.passwordHash);
+    expect(pending.fullName).toBe(original.fullName);
+    expect(pending.language).toBe(original.language);
+    expect(pending.codeHash).toBe(original.codeHash);
+    expect(pending.expiresAt).toEqual(original.expiresAt);
+    expect(pending.lastSentAt).toEqual(original.lastSentAt);
     expect(mailService.sendRegistrationVerificationCode).toHaveBeenCalledTimes(
       1,
     );
   });
 
-  it('updates pending registration data after cooldown and invalidates the old code', async () => {
-    const oldCode = await beginRegistration();
+  it('returns an accurate resend delay for an existing pending registration', async () => {
+    await beginRegistration();
     const pending = getPendingRegistration();
-    const oldPasswordHash = pending.passwordHash;
-    pending.lastSentAt = new Date(Date.now() - 61_000);
+    pending.lastSentAt = new Date(Date.now() - 20_000);
 
-    const newCode = await beginRegistration({
-      fullName: 'Updated Name',
-      password: 'updated-password',
-      language: SupportedLanguage.UK,
+    const result = await authService.register({
+      fullName: 'Ignored Name',
+      email: pending.email,
+      password: 'ignored-password',
     });
 
+    expect(result.resendAvailableInSeconds).toBe(40);
+    expect(mailService.sendRegistrationVerificationCode).toHaveBeenCalledTimes(
+      1,
+    );
+  });
+
+  it('replaces an expired pending registration with a fresh registration', async () => {
+    const oldCode = await beginRegistration();
+    const expired = getPendingRegistration();
+    const expiredId = expired.id;
+    const expiredPasswordHash = expired.passwordHash;
+    expired.pendingExpiresAt = new Date(Date.now() - 1);
+
+    const newCode = await beginRegistration({
+      fullName: 'Fresh Name',
+      password: 'fresh-password',
+      language: SupportedLanguage.UK,
+    });
+    const fresh = getPendingRegistration();
+
     expect(pendingRegistrations.size).toBe(1);
-    expect(pending.fullName).toBe('Updated Name');
-    expect(pending.language).toBe(SupportedLanguage.UK);
-    expect(pending.passwordHash).not.toBe(oldPasswordHash);
+    expect(fresh.id).not.toBe(expiredId);
+    expect(fresh.fullName).toBe('Fresh Name');
+    expect(fresh.language).toBe(SupportedLanguage.UK);
+    expect(fresh.passwordHash).not.toBe(expiredPasswordHash);
     await expect(
-      argon2.verify(pending.passwordHash, 'updated-password'),
+      argon2.verify(fresh.passwordHash, 'fresh-password'),
     ).resolves.toBe(true);
-    await expect(argon2.verify(pending.codeHash, oldCode)).resolves.toBe(false);
-    await expect(argon2.verify(pending.codeHash, newCode)).resolves.toBe(true);
+    await expect(argon2.verify(fresh.codeHash, oldCode)).resolves.toBe(false);
+    await expect(argon2.verify(fresh.codeHash, newCode)).resolves.toBe(true);
+    expect(mailService.sendRegistrationVerificationCode).toHaveBeenCalledTimes(
+      2,
+    );
   });
 
   it('invalidates the pending code when registration email delivery fails', async () => {
@@ -856,15 +885,24 @@ describe('AuthService', () => {
   it('resends after cooldown, invalidates the old code, and resets attempts', async () => {
     const oldCode = await beginRegistration();
     const pending = getPendingRegistration();
+    const originalCodeHash = pending.codeHash;
     pending.lastSentAt = new Date(Date.now() - 61_000);
     pending.attemptCount = 3;
     usersService.findByEmail.mockResolvedValue(null);
+
+    await authService.register({
+      fullName: 'Ignored Name',
+      email: pending.email,
+      password: 'ignored-password',
+    });
+    expect(pending.codeHash).toBe(originalCodeHash);
 
     await authService.resendRegistrationCode({ email: pending.email });
     const newCode =
       mailService.sendRegistrationVerificationCode.mock.calls.at(-1)?.[1] ?? '';
 
     expect(pending.attemptCount).toBe(0);
+    expect(pending.codeHash).not.toBe(originalCodeHash);
     await expect(argon2.verify(pending.codeHash, oldCode)).resolves.toBe(false);
     await expect(argon2.verify(pending.codeHash, newCode)).resolves.toBe(true);
   });

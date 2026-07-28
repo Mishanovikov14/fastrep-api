@@ -65,11 +65,14 @@ sanitized user and token response
 ```
 
 The controller delegates validated DTOs to `AuthService`. Registration
-normalizes the email, hashes the password and verification code, persists only
-pending state, and sends a localized code through `MailService`. Verification
-atomically consumes the pending record, creates the verified user and hashed
-refresh-token state through `PrismaService`, then returns only public user
-fields and issued tokens.
+normalizes the email and, for a new email, hashes the password and verification
+code, persists only pending state, and sends a localized code through
+`MailService`. Repeating registration for an unexpired pending email returns
+that state unchanged and does not resend. The dedicated resend operation owns
+code replacement and its database-backed cooldown. Verification atomically
+consumes the pending record, creates the verified user and hashed refresh-token
+state through `PrismaService`, then returns only public user fields and issued
+tokens.
 
 ## Architectural principles
 

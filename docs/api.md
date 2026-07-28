@@ -21,15 +21,15 @@ default is `en`.
 
 ## POST /auth/register
 
-Creates or refreshes a pending registration and emails a six-digit verification
-code. It does not create a `User` or issue tokens.
+Starts a pending registration and emails a six-digit verification code when the
+normalized email is new. It does not create a `User` or issue tokens.
 
 - Authentication: not required
 - Success: `201 Created`
 - Important errors: `400 Bad Request` for DTO validation; `409 Conflict` when a
-  permanent user already has the email; `429 Too Many Requests` during the
-  resend cooldown; `503 Service Unavailable` when registration or email
-  delivery is temporarily unavailable
+  permanent user already has the email; `429 Too Many Requests` for IP
+  throttling; `503 Service Unavailable` when registration or email delivery is
+  temporarily unavailable
 
 Request body:
 
@@ -59,9 +59,12 @@ Successful response:
 }
 ```
 
-Submitting registration again after the cooldown updates the same pending
-record and invalidates the previous code. It does not extend the pending
-registration's total lifetime.
+Submitting registration again for an unexpired pending email returns the same
+response without changing its password hash, profile data, code, attempts, or
+expiry, and without sending another email. `resendAvailableInSeconds` is
+calculated from the stored `lastSentAt`; use the dedicated resend endpoint when
+it reaches zero. A pending registration past its total lifetime is deleted and
+the registration request starts a completely fresh pending registration.
 
 ## POST /auth/verify-registration
 
@@ -84,8 +87,9 @@ Failed attempts are limited. Expired pending registrations are removed lazily.
 
 ## POST /auth/resend-registration-code
 
-Issues a new code for an unexpired pending registration and invalidates the old
-code.
+This is the only endpoint that issues a replacement code for an unexpired
+pending registration. It invalidates the old code, resets failed attempts,
+updates code expiry and `lastSentAt`, and sends another email.
 
 - Authentication: not required
 - Success: `204 No Content`

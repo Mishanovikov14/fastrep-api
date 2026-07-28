@@ -43,9 +43,9 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @ApiOperation({
-    summary: 'Begin registration and email a verification code',
+    summary: 'Start a pending registration',
     description:
-      'Creates or updates a temporary pending registration. No permanent user or authentication tokens are created until verification succeeds.',
+      'Creates a pending registration and emails its verification code when the normalized email is new. An existing unexpired pending registration is returned unchanged without resending. No permanent user or authentication tokens are created until verification succeeds.',
   })
   @ApiCreatedResponse({
     description: 'Verification is required before the account is created.',
@@ -54,8 +54,7 @@ export class AuthController {
   @ApiBadRequestResponse({ description: 'Invalid registration data.' })
   @ApiConflictResponse({ description: 'Email already exists.' })
   @ApiTooManyRequestsResponse({
-    description: 'IP rate limit or per-email resend cooldown exceeded.',
-    type: RegistrationCooldownResponseDto,
+    description: 'IP rate limit exceeded.',
   })
   @ApiServiceUnavailableResponse({
     description: 'Registration email delivery is temporarily unavailable.',
@@ -99,7 +98,7 @@ export class AuthController {
   @ApiOperation({
     summary: 'Resend a pending registration code',
     description:
-      'Returns the same empty response for unknown and already-registered emails. Expired pending registrations require a fresh registration request.',
+      'The dedicated operation for replacing and emailing a pending registration code. Returns the same empty response for unknown and already-registered emails. Expired pending registrations require a fresh registration request.',
   })
   @ApiNoContentResponse({
     description:

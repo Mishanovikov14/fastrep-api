@@ -61,6 +61,19 @@ type PreparedTokenPair = {
   expiresAt: Date;
 };
 
+type RegistrationStartResult =
+  | {
+      shouldSend: false;
+      lastSentAt: Date;
+    }
+  | {
+      shouldSend: true;
+      pendingRegistrationId: string;
+      code: string;
+      codeHash: string;
+      language: SupportedLanguage;
+    };
+
 @Injectable()
 export class AuthService {
   constructor(
@@ -79,97 +92,86 @@ export class AuthService {
       throw new ConflictException('A user with this email already exists');
     }
 
-    const passwordHash = await argon2.hash(dto.password, {
-      type: argon2.argon2id,
-    });
-    const language = dto.language ?? SupportedLanguage.EN;
     const policy = this.getRegistrationPolicy();
     const now = new Date();
-    const code = this.generateSixDigitCode();
-    const codeHash = await argon2.hash(code, { type: argon2.argon2id });
-    let pendingRegistrationId: string;
+    let registration: RegistrationStartResult;
 
     try {
-      const pendingRegistration = await this.prisma.$transaction(
-        async (transaction) => {
-          const permanentUser = await transaction.user.findUnique({
-            where: { email },
-            select: { id: true },
+      registration = await this.prisma.$transaction(async (transaction) => {
+        const permanentUser = await transaction.user.findUnique({
+          where: { email },
+          select: { id: true },
+        });
+
+        if (permanentUser) {
+          throw new ConflictException('A user with this email already exists');
+        }
+
+        let pending = await transaction.pendingRegistration.findUnique({
+          where: { email },
+        });
+
+        if (pending && pending.pendingExpiresAt <= now) {
+          const deleted = await transaction.pendingRegistration.deleteMany({
+            where: { id: pending.id, pendingExpiresAt: { lte: now } },
           });
 
-          if (permanentUser) {
-            throw new ConflictException(
-              'A user with this email already exists',
-            );
-          }
+          if (deleted.count !== 1) {
+            const currentPending =
+              await transaction.pendingRegistration.findUnique({
+                where: { email },
+              });
 
-          let pending = await transaction.pendingRegistration.findUnique({
-            where: { email },
-          });
-
-          if (pending && pending.pendingExpiresAt <= now) {
-            await transaction.pendingRegistration.deleteMany({
-              where: { id: pending.id, pendingExpiresAt: { lte: now } },
-            });
-            pending = null;
-          }
-
-          if (pending) {
-            this.enforceRegistrationCooldown(
-              pending.lastSentAt,
-              now,
-              policy.resendCooldownSeconds,
-            );
-
-            const updated = await transaction.pendingRegistration.updateMany({
-              where: {
-                id: pending.id,
-                email,
-                lastSentAt: pending.lastSentAt,
-                pendingExpiresAt: { gt: now },
-              },
-              data: {
-                fullName: dto.fullName,
-                passwordHash,
-                language,
-                codeHash,
-                expiresAt: this.addMinutes(now, policy.codeTtlMinutes),
-                attemptCount: 0,
-                lastSentAt: now,
-              },
-            });
-
-            if (updated.count !== 1) {
-              throw this.registrationCooldownException(
-                policy.resendCooldownSeconds,
-              );
+            if (currentPending && currentPending.pendingExpiresAt > now) {
+              return {
+                shouldSend: false as const,
+                lastSentAt: currentPending.lastSentAt,
+              };
             }
-
-            return { id: pending.id };
           }
 
-          return transaction.pendingRegistration.create({
-            data: {
-              email,
-              fullName: dto.fullName,
-              passwordHash,
-              language,
-              codeHash,
-              expiresAt: this.addMinutes(now, policy.codeTtlMinutes),
-              lastSentAt: now,
-              pendingExpiresAt: this.addHours(now, policy.pendingTtlHours),
-            },
-            select: { id: true },
-          });
-        },
-      );
-      pendingRegistrationId = pendingRegistration.id;
+          pending = null;
+        }
+
+        if (pending) {
+          return {
+            shouldSend: false as const,
+            lastSentAt: pending.lastSentAt,
+          };
+        }
+
+        const passwordHash = await argon2.hash(dto.password, {
+          type: argon2.argon2id,
+        });
+        const language = dto.language ?? SupportedLanguage.EN;
+        const code = this.generateSixDigitCode();
+        const codeHash = await argon2.hash(code, {
+          type: argon2.argon2id,
+        });
+        const created = await transaction.pendingRegistration.create({
+          data: {
+            email,
+            fullName: dto.fullName,
+            passwordHash,
+            language,
+            codeHash,
+            expiresAt: this.addMinutes(now, policy.codeTtlMinutes),
+            lastSentAt: now,
+            pendingExpiresAt: this.addHours(now, policy.pendingTtlHours),
+          },
+          select: { id: true },
+        });
+
+        return {
+          shouldSend: true as const,
+          pendingRegistrationId: created.id,
+          code,
+          codeHash,
+          language,
+        };
+      });
     } catch (error) {
-      if (
-        error instanceof ConflictException ||
-        (error instanceof HttpException &&
-          error.getStatus() === TOO_MANY_REQUESTS_STATUS)
-      ) {
+      if (error instanceof ConflictException) {
         throw error;
       }
 
@@ -178,7 +180,22 @@ export class AuthService {
           throw new ConflictException('A user with this email already exists');
         }
 
-        throw this.registrationCooldownException(policy.resendCooldownSeconds);
+        const concurrentPending =
+          await this.prisma.pendingRegistration.findUnique({
+            where: { email },
+          });
+
+        if (
+          concurrentPending &&
+          concurrentPending.pendingExpiresAt > new Date()
+        ) {
+          return this.registrationPendingResult(
+            email,
+            concurrentPending.lastSentAt,
+            new Date(),
+            policy.resendCooldownSeconds,
+          );
+        }
       }
 
       throw new ServiceUnavailableException(
@@ -186,17 +203,26 @@ export class AuthService {
       );
     }
 
+    if (!registration.shouldSend) {
+      return this.registrationPendingResult(
+        email,
+        registration.lastSentAt,
+        now,
+        policy.resendCooldownSeconds,
+      );
+    }
+
     try {
       await this.mailService.sendRegistrationVerificationCode(
         email,
-        code,
+        registration.code,
         policy.codeTtlMinutes,
-        language,
+        registration.language,
       );
     } catch {
       await this.invalidatePendingRegistrationCode(
-        pendingRegistrationId,
-        codeHash,
+        registration.pendingRegistrationId,
+        registration.codeHash,
         policy.maxAttempts,
         new Date(),
       );
@@ -205,11 +231,12 @@ export class AuthService {
       );
     }
 
-    return {
+    return this.registrationPendingResult(
       email,
-      verificationRequired: true,
-      resendAvailableInSeconds: policy.resendCooldownSeconds,
-    };
+      now,
+      now,
+      policy.resendCooldownSeconds,
+    );
   }
 
   async verifyRegistration(
@@ -919,13 +946,45 @@ export class AuthService {
     now: Date,
     cooldownSeconds: number,
   ): void {
-    const retryAfterSeconds = Math.ceil(
-      (lastSentAt.getTime() + cooldownSeconds * 1000 - now.getTime()) / 1000,
+    const retryAfterSeconds = this.registrationResendAvailableInSeconds(
+      lastSentAt,
+      now,
+      cooldownSeconds,
     );
 
     if (retryAfterSeconds > 0) {
       throw this.registrationCooldownException(retryAfterSeconds);
     }
+  }
+
+  private registrationPendingResult(
+    email: string,
+    lastSentAt: Date,
+    now: Date,
+    cooldownSeconds: number,
+  ): RegistrationPendingResult {
+    return {
+      email,
+      verificationRequired: true,
+      resendAvailableInSeconds: this.registrationResendAvailableInSeconds(
+        lastSentAt,
+        now,
+        cooldownSeconds,
+      ),
+    };
+  }
+
+  private registrationResendAvailableInSeconds(
+    lastSentAt: Date,
+    now: Date,
+    cooldownSeconds: number,
+  ): number {
+    return Math.max(
+      0,
+      Math.ceil(
+        (lastSentAt.getTime() + cooldownSeconds * 1000 - now.getTime()) / 1000,
+      ),
+    );
   }
 
   private registrationCooldownException(

@@ -156,6 +156,10 @@ See [Auth API](docs/api.md) for request and response examples.
 Supported user language codes are `en`, `fr`, `es`, `uk`, and `de`. The
 default is `en`.
 
+Registration creates pending state only for a new email. Repeating registration
+returns an unexpired pending registration unchanged; clients use
+`POST /auth/resend-registration-code` when they need a replacement code.
+
 ## Project documentation
 
 - [Contributing](CONTRIBUTING.md)
