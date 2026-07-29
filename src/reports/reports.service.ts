@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, ReportStatus } from '../../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { ReportAssetsService } from '../report-assets/report-assets.service';
 import { CreateReportDto } from './dto/create-report.dto';
 import { UpdateReportDto } from './dto/update-report.dto';
 import {
@@ -11,7 +12,10 @@ import {
 
 @Injectable()
 export class ReportsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly reportAssets: ReportAssetsService,
+  ) {}
 
   create(userId: string, dto: CreateReportDto): Promise<ReportRecord> {
     return this.prisma.report.create({
@@ -82,6 +86,16 @@ export class ReportsService {
   }
 
   async delete(userId: string, id: string): Promise<void> {
+    const report = await this.prisma.report.findFirst({
+      where: { id, userId },
+      select: { id: true },
+    });
+
+    if (!report) {
+      throw new NotFoundException('Report not found');
+    }
+
+    await this.reportAssets.deleteObjectsForReport(userId, id);
     const deleted = await this.prisma.report.deleteMany({
       where: { id, userId },
     });

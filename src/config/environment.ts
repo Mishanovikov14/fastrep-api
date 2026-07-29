@@ -28,6 +28,20 @@ const positiveIntegerWithDefault = (
   environment[key] = String(value);
 };
 
+const booleanWithDefault = (
+  environment: Environment,
+  key: string,
+  defaultValue: boolean,
+): void => {
+  const value = environment[key] ?? String(defaultValue);
+
+  if (value !== 'true' && value !== 'false') {
+    throw new Error(`${key} must be either true or false`);
+  }
+
+  environment[key] = value;
+};
+
 export const validateEnvironment = (environment: Environment): Environment => {
   requireString(environment, 'DATABASE_URL');
   requireString(environment, 'JWT_ACCESS_SECRET');
@@ -52,10 +66,32 @@ export const validateEnvironment = (environment: Environment): Environment => {
     60,
   );
   positiveIntegerWithDefault(environment, 'PENDING_REGISTRATION_TTL_HOURS', 24);
+  positiveIntegerWithDefault(environment, 'IMAGE_MAX_BYTES', 10_485_760);
+  positiveIntegerWithDefault(environment, 'AUDIO_MAX_BYTES', 52_428_800);
+  positiveIntegerWithDefault(environment, 'DOCUMENT_MAX_BYTES', 26_214_400);
+  positiveIntegerWithDefault(
+    environment,
+    'REPORT_MAX_TOTAL_ASSET_BYTES',
+    157_286_400,
+  );
+  positiveIntegerWithDefault(environment, 'REPORT_MAX_IMAGES', 20);
+  positiveIntegerWithDefault(environment, 'REPORT_MAX_AUDIO_FILES', 5);
+  positiveIntegerWithDefault(environment, 'REPORT_MAX_DOCUMENTS', 10);
+  positiveIntegerWithDefault(environment, 'IMAGE_MAX_WIDTH', 4096);
+  positiveIntegerWithDefault(environment, 'IMAGE_MAX_HEIGHT', 4096);
+  positiveIntegerWithDefault(environment, 'AUDIO_MAX_DURATION_SECONDS', 1200);
+  positiveIntegerWithDefault(environment, 'UPLOAD_URL_TTL_SECONDS', 600);
+  positiveIntegerWithDefault(environment, 'PENDING_UPLOAD_TTL_MINUTES', 30);
+  booleanWithDefault(environment, 'S3_FORCE_PATH_STYLE', false);
 
   if (nodeEnvironment === 'production') {
     requireString(environment, 'RESEND_API_KEY');
     requireString(environment, 'EMAIL_FROM');
+    requireString(environment, 'S3_ENDPOINT');
+    requireString(environment, 'S3_REGION');
+    requireString(environment, 'S3_BUCKET');
+    requireString(environment, 'S3_ACCESS_KEY_ID');
+    requireString(environment, 'S3_SECRET_ACCESS_KEY');
     const port = requireString(environment, 'PORT');
     const swaggerEnabled = requireString(environment, 'SWAGGER_ENABLED');
 

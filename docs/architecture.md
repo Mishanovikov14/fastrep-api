@@ -8,10 +8,10 @@ React Native client
         | HTTPS REST API
         v
 NestJS backend
-        |
-        | Prisma
-        v
-PostgreSQL
+    |           |
+    | Prisma    | presigned contracts, HEAD, bounded range reads
+    v           v
+PostgreSQL   private S3-compatible object storage
 ```
 
 FastRep API is currently a NestJS modular monolith. The mobile client calls JSON REST endpoints. NestJS validates and handles requests, and Prisma is the direct database access layer for PostgreSQL.
@@ -23,6 +23,44 @@ FastRep API is currently a NestJS modular monolith. The mobile client calls JSON
 - **Users** provides user lookup and mutation operations to other application services. It does not currently expose a controller.
 - **Auth** owns verified-email registration, login, refresh-token rotation, logout, password recovery, access-token protection, and current-user retrieval.
 - **Mail** isolates email delivery and templates from authentication business logic. Resend is the current provider.
+- **Reports** owns report metadata and report lifecycle operations.
+- **Report Assets** owns upload-slot validation, asset limits, confirmation,
+  signature inspection, listing, lazy expiration, and asset deletion.
+- **Storage** wraps the S3-compatible provider. No controller calls the provider
+  SDK directly.
+
+## Direct report-asset upload flow
+
+```text
+mobile -> API: request upload slot
+API -> PostgreSQL: create PENDING_UPLOAD ReportAsset
+API -> mobile: short-lived presigned POST
+mobile -> private S3: upload file body directly
+mobile -> API: confirm asset
+API -> S3: HEAD plus bounded initial-byte range
+API -> PostgreSQL: READY or REJECTED
+```
+
+The presigned POST fixes the backend-generated object key and content type and
+enforces a content-length range. Confirmation independently requires the exact
+declared size, applies current server limits, and inspects signatures without
+loading a large object into NestJS memory. Provider errors are converted to
+controlled service errors.
+
+Only `DRAFT` reports accept new upload requests. Ownership is always resolved
+through `Report.userId`; foreign report/asset combinations return 404.
+
+Expired pending uploads are cleaned lazily during upload-slot requests. Their
+objects are deleted and rows become `REJECTED`; expired pending rows are
+excluded from limit calculations even when provider cleanup must be retried.
+A scheduled cleanup job can be added later if volume makes request-driven
+cleanup insufficient.
+
+S3 and PostgreSQL cannot share a transaction. Asset and report deletion
+therefore delete known storage objects first and retain database rows and keys
+when storage is unavailable. After object deletion succeeds, database deletion
+uses the `ReportAsset.reportId` cascade. S3 delete is idempotent for a missing
+key, so retries remain safe.
 
 ## Registration request flow
 
@@ -91,7 +129,6 @@ tokens.
 
 The following integrations are planned and are not currently implemented:
 
-- AWS S3 for file storage;
 - an AI provider for report generation;
 - backend PDF generation.
 
