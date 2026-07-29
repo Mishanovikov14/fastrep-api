@@ -43,4 +43,29 @@ describe('ObjectStorageService', () => {
       name: 'ServiceUnavailable',
     });
   });
+
+  it('HEAD-verifies an uploaded output before returning success', async () => {
+    send.mockResolvedValueOnce({}).mockResolvedValueOnce({ ContentLength: 4 });
+
+    await expect(
+      service.uploadObject(
+        'private-output.pdf',
+        Uint8Array.from([1, 2, 3, 4]),
+        'application/pdf',
+      ),
+    ).resolves.toEqual({ size: 4 });
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects publication when uploaded output verification mismatches', async () => {
+    send.mockResolvedValueOnce({}).mockResolvedValueOnce({ ContentLength: 3 });
+
+    await expect(
+      service.uploadObject(
+        'partial-output.pdf',
+        Uint8Array.from([1, 2, 3, 4]),
+        'application/pdf',
+      ),
+    ).rejects.toThrow('Uploaded object verification failed');
+  });
 });

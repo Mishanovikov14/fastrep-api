@@ -1,0 +1,13 @@
+export const REPORT_GENERATION_JOB_NAME = 'generate-report';
+export const REPORT_PROMPT_VERSION = 'report-v1';
+export const SERIALIZABLE_RETRY_LIMIT = 3;
+
+export const GENERATION_PROGRESS = {
+  PREPARING: 5,
+  TRANSCRIBING: 10,
+  ANALYZING: 40,
+  GENERATING_CONTENT: 60,
+  GENERATING_PDF: 80,
+  UPLOADING_OUTPUT: 95,
+  COMPLETED: 100,
+} as const;

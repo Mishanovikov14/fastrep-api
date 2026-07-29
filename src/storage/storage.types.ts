@@ -8,3 +8,8 @@ export type PresignedUploadContract = {
 export type StoredObjectMetadata = {
   size: number;
 };
+
+export type PresignedDownloadContract = {
+  url: string;
+  expiresAt: Date;
+};

@@ -1,6 +1,8 @@
 # FastRep API
 
-FastRep API is the NestJS backend for the FastRep mobile application. The current implementation provides user accounts, JWT-based authentication, reports, and private direct-upload storage for report assets. AI processing and PDF generation are not implemented.
+FastRep API is the NestJS backend for the FastRep mobile application. It
+provides accounts, reports, private direct-upload storage, quota-controlled
+asynchronous AI report generation, and private PDF output delivery.
 
 ## Current status
 
@@ -10,9 +12,12 @@ The repository currently includes:
 - PostgreSQL running locally through Docker Compose;
 - Prisma schema, migrations, and generated client integration;
 - `User`, `PendingRegistration`, `RefreshToken`, `PasswordResetRequest`,
-  `Report`, `ReportAsset`, and `StorageCleanupTask` models;
+  report-generation, entitlement, credit-ledger, and cleanup-outbox models;
 - verified-email registration, login, token refresh, logout, current-user, password-recovery, and Reports endpoints;
 - short-lived presigned POST uploads to private S3-compatible object storage;
+- BullMQ/Redis jobs processed by a separately deployed worker;
+- OpenAI Responses API structured output and cached audio transcription;
+- server-rendered Unicode PDF output stored in the private bucket;
 - Argon2 password and refresh-token hashing;
 - Resend email delivery behind a generic mail abstraction;
 - DTO validation, unit tests, E2E tests, and lightweight CI.
@@ -23,6 +28,9 @@ The repository currently includes:
 - NestJS 11 and TypeScript
 - Prisma 7 with the PostgreSQL adapter
 - PostgreSQL 16
+- Redis and BullMQ
+- official OpenAI Node SDK and Responses API
+- PDFKit with embedded OFL-licensed Noto Sans fonts
 - Docker Compose
 - JWT access and refresh tokens
 - Jest and Supertest
@@ -34,11 +42,13 @@ React Native client
         |
         | HTTPS REST API
         v
-NestJS backend
-    |           |
-    | Prisma    | presigned contracts and verification
-    v           v
-PostgreSQL   private S3-compatible storage
+NestJS API -> PostgreSQL
+     |              ^
+     v              | durable state and ledgers
+BullMQ / Redis -> NestJS worker -> OpenAI
+                         |
+                         v
+                private S3-compatible storage
 ```
 
 The backend is a modular monolith with thin controllers, service-owned business logic, dependency injection, DTO validation, and direct database access through `PrismaService`. See [Architecture](docs/architecture.md) for details.
@@ -80,6 +90,7 @@ The API listens on `http://localhost:3000` by default. The Docker Compose servic
 | `S3_ACCESS_KEY_ID` | Production | Object-storage access key ID. |
 | `S3_SECRET_ACCESS_KEY` | Production | Object-storage secret access key. |
 | `S3_FORCE_PATH_STYLE` | No | Use path-style S3 addressing; defaults to `false`. |
+| `S3_REQUEST_TIMEOUT_MS` | No | S3 connection/socket timeout; defaults to `60000`. |
 | `IMAGE_MAX_BYTES` | No | Per-image limit; defaults to `10485760`. |
 | `AUDIO_MAX_BYTES` | No | Per-audio limit; defaults to `52428800`. |
 | `DOCUMENT_MAX_BYTES` | No | Per-document limit; defaults to `26214400`. |
@@ -91,6 +102,26 @@ The API listens on `http://localhost:3000` by default. The Docker Compose servic
 | `AUDIO_MAX_DURATION_SECONDS` | No | Detected audio duration limit; defaults to `1200`. |
 | `UPLOAD_URL_TTL_SECONDS` | No | Presigned upload lifetime; defaults to `600`. |
 | `PENDING_UPLOAD_TTL_MINUTES` | No | Pending-upload reservation lifetime; defaults to `30`. |
+| `OPENAI_API_KEY` | Production when AI enabled | OpenAI project API key; never exposed to clients or logs. |
+| `OPENAI_REPORT_MODEL` | Production when AI enabled | Responses model; default `gpt-5-mini`. |
+| `OPENAI_TRANSCRIPTION_MODEL` | Production when AI enabled | Audio model; default `gpt-4o-mini-transcribe`. |
+| `OPENAI_REQUEST_TIMEOUT_MS` / `OPENAI_MAX_RETRIES` | No | SDK timeout and retries; defaults `180000` and `0`, and retries must remain `0`. Application and queue budgets own retries. |
+| `OPENAI_FILE_TTL_SECONDS` | No | Temporary provider-file expiry, 3600-2592000; default `3600`. Files are also deleted best effort. |
+| `REDIS_URL` | Production worker, and API when AI enabled | Redis connection shared by API producer and worker. |
+| `REPORT_GENERATION_QUEUE_NAME` | Production worker, and API when AI enabled | Explicit shared BullMQ queue name; development default `report-generation`. |
+| `REPORT_GENERATION_JOB_ATTEMPTS` / `REPORT_GENERATION_BACKOFF_MS` | No | Durable job attempts and exponential backoff; defaults `2` and `30000`. |
+| `REPORT_GENERATION_JOB_TIMEOUT_MS` / `REPORT_GENERATION_CONCURRENCY` | No | Processing lease/worker lock and worker concurrency; defaults `900000` and `1`. |
+| `AI_MAX_PROVIDER_CALLS_PER_GENERATION` | No | Report-model/moderation call budget per operation; default `2`. |
+| `TRANSCRIPTION_MAX_ATTEMPTS_PER_ASSET` | No | Durable transcription call budget; default `2`. |
+| `AI_MAX_OUTPUT_TOKENS` | No | Responses output cap; default `6000`. |
+| `GENERATION_MAX_ACTIVE_PER_USER` | No | Active-generation ceiling; MVP requires `1`. |
+| `GENERATION_START_RATE_LIMIT` / `GENERATION_START_RATE_WINDOW_SECONDS` | No | Per-user start limit; defaults `5` per `3600` seconds. |
+| `GENERATION_DAILY_SAFETY_LIMIT` / `AI_GLOBAL_DAILY_GENERATION_LIMIT` | No | Per-user/global rolling-day caps; defaults `20` and `500`. |
+| `AI_GENERATION_ENABLED` | Production | Strict global generation kill switch. It must be explicit in production; development defaults to `true`. |
+| `REPORT_OUTPUT_MAX_BYTES` / `DOWNLOAD_URL_TTL_SECONDS` | No | PDF size and signed-download lifetime; defaults `52428800` and `600`. |
+| `REPORT_PDF_MAX_PAGES` / `REPORT_PDF_MAX_IMAGE_BYTES` | No | PDF page and aggregate image-byte safeguards; defaults `100` and `52428800`. |
+| `ENABLE_DEV_CREDIT_GRANTS` | No | Must be `true` to run the development credit CLI outside production. |
+| `FASTREP_PROCESS_ROLE` | No | `api` or `worker`; the worker entry point sets `worker` for role-specific validation. |
 | `NODE_ENV`           | Yes      | Runtime environment. Use `production` for hosted deployments.                              |
 | `PORT`               | Production | HTTP port. Defaults to `3000` outside production.                                        |
 | `SWAGGER_ENABLED`    | Production | Exposes Swagger only when set to `true`.                                                 |
@@ -145,6 +176,29 @@ only committed migrations and never `prisma migrate dev`.
 The service binds to Railway's `PORT` on `0.0.0.0`. `GET /health` returns a
 minimal operational status for health checks.
 
+Create a second Railway service from the same repository for the worker. Give
+both services the same database, Redis, S3, OpenAI, model, limits, and queue
+variables. The API starts with `npm run start:prod`; the worker starts with
+`npm run start:worker:prod`. Apply `npm run prisma:migrate:deploy` once during
+release. Redis must be persistent; the S3 bucket must stay private and must not
+grant a public-read ACL.
+
+Production requires an explicit `AI_GENERATION_ENABLED` value. When it is
+`false`, the API does not require Redis or OpenAI credentials. The worker
+always fails fast without database, Redis, an explicit queue name, OpenAI, and
+S3 configuration. JWT, Resend, `PORT`, and Swagger settings are API-only.
+
+For local/bootstrap testing, grant tracked credits only to a verified user:
+
+```bash
+ENABLE_DEV_CREDIT_GRANTS=true npm run credits:grant -- \
+  --email=user@example.com --credits=5 --idempotency-key=local-ticket-1
+```
+
+The command creates a grant and ledger transaction. Repeating the same key is a
+no-op. There is no public credit-grant endpoint, and the command cannot run
+when `NODE_ENV=production`, even if the development opt-in is set.
+
 ## Development and verification
 
 ```bash
@@ -192,6 +246,17 @@ Report-asset storage includes:
 - `GET /reports/:reportId/assets`
 - `DELETE /reports/:reportId/assets/:assetId`
 
+Generation and output APIs include:
+
+- `GET /me/entitlements`
+- `POST /reports/:reportId/generations`
+- `GET /reports/:reportId/generations/latest`
+- `GET /reports/:reportId/generations/:generationId`
+- `POST /reports/:reportId/generations/:generationId/retry`
+- `POST /reports/:reportId/generations/:generationId/cancel`
+- `GET /reports/:reportId/output`
+- `POST /reports/:reportId/output/download-url`
+
 The bucket must be private. Upload contracts are short-lived presigned POSTs;
 the API never proxies file bodies or persists presigned URLs. iOS clients must
 convert HEIC/HEIF images to JPEG before requesting a slot. The MVP backend
@@ -211,6 +276,22 @@ immediately when possible; temporary failures remain durable and are retried
 lazily on later upload requests.
 
 See [Auth API](docs/api.md) for request and response examples.
+
+Generation costs exactly one reserved credit. It is consumed only when the
+HEAD-verified PDF and database success state commit atomically. Queue failure, queued
+cancellation, or terminal platform/provider failure releases it. Internal
+technical retries reuse the same generation and reservation. Grants are chosen
+by nearest expiry, then subscription credits before non-expiring purchased
+credits. `User.isPremium` is retained only for compatibility and does not grant
+generation access.
+
+The OpenAI SDK performs zero automatic retries. Every paid provider call first
+creates a durable, token-owned attempt with a lease. A live attempt blocks
+duplicate delivery; an expired attempt is closed as stale and remains counted
+before recovery uses the next finite slot. BullMQ redelivery resumes completed
+transcription and structured report state. No retry layer can exceed
+`AI_MAX_PROVIDER_CALLS_PER_GENERATION` per report operation or
+`TRANSCRIPTION_MAX_ATTEMPTS_PER_ASSET` per audio asset.
 
 Supported user language codes are `en`, `fr`, `es`, `uk`, and `de`. The
 default is `en`.

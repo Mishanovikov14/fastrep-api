@@ -7,6 +7,8 @@ import { validateEnvironment } from './config/environment';
 import { AuthModule } from './auth/auth.module';
 import { ReportsModule } from './reports/reports.module';
 import { ReportAssetsModule } from './report-assets/report-assets.module';
+import { EntitlementsModule } from './entitlements/entitlements.module';
+import { ReportGenerationModule } from './report-generation/report-generation.module';
 
 @Module({
   imports: [
@@ -18,6 +20,8 @@ import { ReportAssetsModule } from './report-assets/report-assets.module';
     AuthModule,
     ReportsModule,
     ReportAssetsModule,
+    EntitlementsModule,
+    ReportGenerationModule,
   ],
   controllers: [AppController],
   providers: [AppService],

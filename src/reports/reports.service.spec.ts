@@ -169,10 +169,15 @@ describe('ReportsService', () => {
       }),
     ).resolves.toEqual(updatedReport);
     expect(reportDelegate.updateMany).toHaveBeenCalledWith({
-      where: { id: report.id, userId: 'user-id' },
+      where: {
+        id: report.id,
+        userId: 'user-id',
+        status: { in: [ReportStatus.DRAFT, ReportStatus.FAILED] },
+      },
       data: {
         title: updatedReport.title,
         notes: updatedReport.notes,
+        status: ReportStatus.DRAFT,
       },
     });
   });
@@ -185,13 +190,36 @@ describe('ReportsService', () => {
         title: 'Not allowed',
       }),
     ).rejects.toBeInstanceOf(NotFoundException);
-    expect(reportDelegate.findFirst).not.toHaveBeenCalled();
+    expect(reportDelegate.findFirst).toHaveBeenCalledWith({
+      where: { id: 'foreign-report-id', userId: 'user-id' },
+      select: { id: true },
+    });
+  });
+
+  it('returns a failed report to DRAFT when it is edited', async () => {
+    reportDelegate.updateMany.mockResolvedValue({ count: 1 });
+    reportDelegate.findFirst.mockResolvedValue(
+      createReport({ status: ReportStatus.DRAFT }),
+    );
+
+    await service.update('user-id', report.id, { notes: 'Corrected notes' });
+
+    expect(reportDelegate.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          notes: 'Corrected notes',
+          status: ReportStatus.DRAFT,
+        },
+      }),
+    );
   });
 
   it('deletes an owned report', async () => {
     reportDelegate.findFirst.mockResolvedValue({
       id: report.id,
+      status: ReportStatus.DRAFT,
       assets: [{ storageKey: 'owned-key' }],
+      output: { storageKey: 'output-key' },
     });
     reportDelegate.delete.mockResolvedValue(report);
 
@@ -202,13 +230,20 @@ describe('ReportsService', () => {
           storageKey: 'owned-key',
           reason: 'REPORT_DELETE',
         },
+        {
+          storageKey: 'output-key',
+          reason: 'REPORT_DELETE',
+        },
       ],
       skipDuplicates: true,
     });
     expect(reportDelegate.delete).toHaveBeenCalledWith({
       where: { id: report.id },
     });
-    expect(storageCleanup.attemptMany).toHaveBeenCalledWith(['owned-key']);
+    expect(storageCleanup.attemptMany).toHaveBeenCalledWith([
+      'owned-key',
+      'output-key',
+    ]);
   });
 
   it('deletes the report even when immediate storage cleanup fails', async () => {

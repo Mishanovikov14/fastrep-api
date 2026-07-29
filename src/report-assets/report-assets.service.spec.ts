@@ -662,6 +662,20 @@ describe('ReportAssetsService', () => {
     expect(assetDelegate.deleteMany).not.toHaveBeenCalled();
   });
 
+  it('rejects asset deletion while report generation is processing', async () => {
+    reportDelegate.findFirst.mockResolvedValue({
+      id: 'report-id',
+      status: ReportStatus.PROCESSING,
+    });
+
+    await expect(
+      service.delete('user-id', 'report-id', 'asset-id'),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'REPORT_NOT_EDITABLE' }),
+    });
+    expect(assetDelegate.deleteMany).not.toHaveBeenCalled();
+  });
+
   it('still returns 404 for an asset belonging to another report', async () => {
     assetDelegate.findFirst.mockResolvedValue(null);
     assetDelegate.findUnique.mockResolvedValue({ id: 'asset-id' });
