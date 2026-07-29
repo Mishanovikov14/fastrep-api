@@ -25,6 +25,7 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
+    "test:s3:production": "RUN_PRODUCTION_S3_INTEGRATION=true jest --config ./test/jest-s3-production.json --runInBand",
     "verify": "npm run lint && npm run build && npm test"
   },
   "dependencies": {
