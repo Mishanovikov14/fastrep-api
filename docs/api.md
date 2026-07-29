@@ -257,13 +257,21 @@ HEIC/HEIF is intentionally not accepted. iOS clients must normalize HEIC/HEIF
 to JPEG before requesting a slot; original HEIC files are not persisted.
 Backend image normalization is outside the MVP.
 
-Supported audio MIME types are `audio/mpeg`, `audio/mp4`, `audio/x-m4a`, and
-`audio/wav`. Supported documents are PDF, UTF-8 plain text/CSV, legacy
-Word/Excel, DOCX, and XLSX.
+Supported audio MIME types are `audio/mpeg`, `audio/x-m4a`, and `audio/wav`.
+M4A requires an M4A/M4B/M4P ISO BMFF brand; generic `audio/mp4` and ordinary
+MP4 video are rejected. Supported documents are PDF, UTF-8 plain text/CSV,
+DOCX, and XLSX. Legacy DOC/XLS are not accepted because an OLE header alone
+cannot safely distinguish their contents.
 
 The provider policy enforces a non-empty object no larger than the declared
 size. The backend remains authoritative and rechecks actual size after upload.
 Per-type counts include ready assets and unexpired pending reservations.
+Defaults are 10 MiB per image, 50 MiB per audio file, 25 MiB per document,
+150 MiB total per report, 20 images, 5 audio files, and 10 documents. Detected
+images are limited to 4096×4096 and detectable audio duration to 1200 seconds.
+The upload contract lasts 600 seconds and pending reservations expire after 30
+minutes. Every value is configurable through the validated environment
+variables documented in the README.
 
 ## POST /reports/:reportId/assets/:assetId/confirm
 
@@ -273,9 +281,10 @@ checks the actual signature/category, applies image dimensions and detectable
 audio duration limits, and only then marks the asset `READY`. Repeating confirm
 for a ready asset returns the same asset.
 
-Failed validation deletes the object and records the asset as `REJECTED`. If
-provider deletion fails, the rejected row retains the storage key and a cleanup
-marker for retry. A rejected upload cannot be restored by calling confirm.
+Failed validation records the asset as `REJECTED` and creates a durable
+`StorageCleanupTask` before attempting object deletion. A provider failure
+leaves that task available for retry without exposing provider details. A
+rejected upload cannot be restored by calling confirm.
 
 Stable validation codes include:
 
@@ -288,6 +297,8 @@ Stable validation codes include:
 - `UPLOAD_CONTENT_MISMATCH`
 - `INVALID_IMAGE_DIMENSIONS`
 - `ASSET_NOT_READY`
+- `UPLOAD_SLOT_CONFLICT`
+- `OBJECT_STORAGE_UNAVAILABLE`
 
 Provider errors and raw provider response details are never returned.
 
@@ -299,15 +310,24 @@ public URLs are excluded.
 
 ## DELETE /reports/:reportId/assets/:assetId
 
-Deletes the private object first and then removes the database asset. Success is
-`204 No Content`. A missing object does not prevent cleanup because S3 deletion
-is idempotent. If object storage is unavailable, the database row and key are
-retained and the API returns a controlled `503` so deletion can be retried.
+Atomically stores the object key in `StorageCleanupTask` and removes the
+database asset, then attempts private-object deletion. Success is always `204
+No Content` once database deletion succeeds. A missing object counts as
+successful cleanup. A temporary S3 failure does not keep the asset visible:
+the durable task retains its key and attempt metadata for lazy retry. Repeating
+deletion after the asset is gone is also `204`; a foreign report or an asset
+that exists under another report remains `404`.
+
+Report deletion uses the same database-first outbox model. All asset keys are
+copied to cleanup tasks in the same serializable transaction that deletes the
+owned report. The `ReportAsset` cascade removes metadata, while failed object
+deletions remain retryable and never keep the report visible.
 
 Pending uploads expire after `PENDING_UPLOAD_TTL_MINUTES` (30 by default).
 Expired reservations are ignored by new limit calculations and lazy cleanup
-attempts to delete any stale object. A scheduled cleanup job may be added later
-if request-driven cleanup is insufficient.
+queues their stale keys. Pending cleanup tasks are retried during later upload
+requests. A scheduled worker may be added later if request-driven cleanup is
+insufficient.
 
 # Authentication API (continued)
 

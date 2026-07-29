@@ -21,5 +21,7 @@ and bounded signature inspection before assets become ready.
 - NestJS does not proxy large file bodies.
 - Bucket privacy, provider lifecycle rules, monitoring, and cost remain
   operational responsibilities.
-- S3 deletion is coordinated with database deletion using retryable,
-  object-first best effort because it cannot join a Prisma transaction.
+- S3 deletion is coordinated through a transactional outbox:
+  `StorageCleanupTask` persists keys in the same database transaction that
+  removes visible asset/report state. Immediate cleanup is best effort;
+  failures are logged structurally and retried lazily.

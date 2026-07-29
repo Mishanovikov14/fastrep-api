@@ -90,6 +90,13 @@ enum ReportAssetStatus {
   REJECTED
 }
 
+enum StorageCleanupReason {
+  ASSET_DELETE
+  REPORT_DELETE
+  REJECTED_UPLOAD
+  EXPIRED_UPLOAD
+}
+
 model Report {
   id        String       @id @default(uuid())
   userId    String
@@ -128,4 +135,16 @@ model ReportAsset {
 
   @@index([reportId, position])
   @@index([status, createdAt])
+}
+
+model StorageCleanupTask {
+  id            String               @id @default(uuid())
+  storageKey    String               @unique
+  reason        StorageCleanupReason
+  attemptCount  Int                  @default(0)
+  lastAttemptAt DateTime?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+
+  @@index([createdAt])
 }

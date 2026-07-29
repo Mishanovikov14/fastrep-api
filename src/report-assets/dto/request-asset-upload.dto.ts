@@ -25,7 +25,23 @@ export class RequestAssetUploadDto {
   @MaxLength(255)
   fileName!: string;
 
-  @ApiProperty({ type: String, maxLength: 127, example: 'image/jpeg' })
+  @ApiProperty({
+    enum: [
+      'image/jpeg',
+      'image/png',
+      'image/webp',
+      'audio/mpeg',
+      'audio/x-m4a',
+      'audio/wav',
+      'application/pdf',
+      'text/plain',
+      'text/csv',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ],
+    maxLength: 127,
+    example: 'image/jpeg',
+  })
   @Transform(trimString)
   @IsString()
   @IsNotEmpty()

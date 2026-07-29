@@ -1,7 +1,8 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { NotFoundException } from '@nestjs/common';
 import { Report, ReportStatus } from '../../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { ReportAssetsService } from '../report-assets/report-assets.service';
+import { StorageCleanupService } from '../storage/storage-cleanup.service';
 import { ReportsService } from './reports.service';
 
 const createReport = (overrides: Partial<Report> = {}): Report => ({
@@ -25,9 +26,13 @@ describe('ReportsService', () => {
     findFirst: jest.Mock;
     updateMany: jest.Mock;
     deleteMany: jest.Mock;
+    delete: jest.Mock;
   };
-  let reportAssets: {
-    deleteObjectsForReport: jest.Mock;
+  let cleanupTaskDelegate: {
+    createMany: jest.Mock;
+  };
+  let storageCleanup: {
+    attemptMany: jest.Mock;
   };
 
   beforeEach(() => {
@@ -39,20 +44,38 @@ describe('ReportsService', () => {
       findFirst: jest.fn(),
       updateMany: jest.fn(),
       deleteMany: jest.fn(),
+      delete: jest.fn(),
+    };
+    cleanupTaskDelegate = {
+      createMany: jest.fn().mockResolvedValue({ count: 0 }),
     };
     const prisma = {
       report: reportDelegate,
-      $transaction: jest.fn((operations: Promise<unknown>[]) =>
-        Promise.all(operations),
+      storageCleanupTask: cleanupTaskDelegate,
+      $transaction: jest.fn(
+        (
+          input:
+            | Promise<unknown>[]
+            | ((transaction: {
+                report: typeof reportDelegate;
+                storageCleanupTask: typeof cleanupTaskDelegate;
+              }) => Promise<unknown>),
+        ) =>
+          Array.isArray(input)
+            ? Promise.all(input)
+            : input({
+                report: reportDelegate,
+                storageCleanupTask: cleanupTaskDelegate,
+              }),
       ),
     } as unknown as PrismaService;
 
-    reportAssets = {
-      deleteObjectsForReport: jest.fn(),
+    storageCleanup = {
+      attemptMany: jest.fn().mockResolvedValue(undefined),
     };
     service = new ReportsService(
       prisma,
-      reportAssets as unknown as ReportAssetsService,
+      storageCleanup as unknown as StorageCleanupService,
     );
   });
 
@@ -166,17 +189,45 @@ describe('ReportsService', () => {
   });
 
   it('deletes an owned report', async () => {
-    reportDelegate.findFirst.mockResolvedValue({ id: report.id });
-    reportDelegate.deleteMany.mockResolvedValue({ count: 1 });
+    reportDelegate.findFirst.mockResolvedValue({
+      id: report.id,
+      assets: [{ storageKey: 'owned-key' }],
+    });
+    reportDelegate.delete.mockResolvedValue(report);
 
     await expect(service.delete('user-id', report.id)).resolves.toBeUndefined();
-    expect(reportAssets.deleteObjectsForReport).toHaveBeenCalledWith(
-      'user-id',
-      report.id,
-    );
-    expect(reportDelegate.deleteMany).toHaveBeenCalledWith({
-      where: { id: report.id, userId: 'user-id' },
+    expect(cleanupTaskDelegate.createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          storageKey: 'owned-key',
+          reason: 'REPORT_DELETE',
+        },
+      ],
+      skipDuplicates: true,
     });
+    expect(reportDelegate.delete).toHaveBeenCalledWith({
+      where: { id: report.id },
+    });
+    expect(storageCleanup.attemptMany).toHaveBeenCalledWith(['owned-key']);
+  });
+
+  it('deletes the report even when immediate storage cleanup fails', async () => {
+    reportDelegate.findFirst.mockResolvedValue({
+      id: report.id,
+      assets: [{ storageKey: 'first-key' }, { storageKey: 'failed-key' }],
+    });
+    reportDelegate.delete.mockResolvedValue(report);
+    storageCleanup.attemptMany.mockRejectedValue(new Error('temporary'));
+
+    await expect(service.delete('user-id', report.id)).resolves.toBeUndefined();
+    expect(cleanupTaskDelegate.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.arrayContaining([
+          expect.objectContaining({ storageKey: 'failed-key' }),
+        ]),
+      }),
+    );
+    expect(reportDelegate.delete).toHaveBeenCalled();
   });
 
   it('cannot delete another user’s report', async () => {
@@ -185,6 +236,7 @@ describe('ReportsService', () => {
     await expect(
       service.delete('user-id', 'foreign-report-id'),
     ).rejects.toBeInstanceOf(NotFoundException);
-    expect(reportAssets.deleteObjectsForReport).not.toHaveBeenCalled();
+    expect(reportDelegate.delete).not.toHaveBeenCalled();
+    expect(cleanupTaskDelegate.createMany).not.toHaveBeenCalled();
   });
 });

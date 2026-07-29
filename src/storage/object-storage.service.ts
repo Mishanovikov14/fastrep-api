@@ -109,12 +109,20 @@ export class ObjectStorageService {
 
   async deleteObject(storageKey: string): Promise<void> {
     this.ensureConfigured();
-    await this.client.send(
-      new DeleteObjectCommand({
-        Bucket: this.bucket,
-        Key: storageKey,
-      }),
-    );
+    try {
+      await this.client.send(
+        new DeleteObjectCommand({
+          Bucket: this.bucket,
+          Key: storageKey,
+        }),
+      );
+    } catch (error: unknown) {
+      if (this.isNotFound(error)) {
+        return;
+      }
+
+      throw error;
+    }
   }
 
   private ensureConfigured(): void {

@@ -9,7 +9,8 @@ The repository currently includes:
 - a NestJS modular monolith;
 - PostgreSQL running locally through Docker Compose;
 - Prisma schema, migrations, and generated client integration;
-- `User`, `PendingRegistration`, `RefreshToken`, `PasswordResetRequest`, `Report`, and `ReportAsset` models;
+- `User`, `PendingRegistration`, `RefreshToken`, `PasswordResetRequest`,
+  `Report`, `ReportAsset`, and `StorageCleanupTask` models;
 - verified-email registration, login, token refresh, logout, current-user, password-recovery, and Reports endpoints;
 - short-lived presigned POST uploads to private S3-compatible object storage;
 - Argon2 password and refresh-token hashing;
@@ -124,7 +125,9 @@ Railway builds and starts the API from committed source; generated Prisma Client
 files are not committed. Configure Railway environment variables, including the
 Neon PostgreSQL connection string as `DATABASE_URL`, Resend credentials, the
 verified `EMAIL_FROM` sender, and the registration and password-reset policy
-variables, then use:
+variables. Also configure the private S3-compatible endpoint, region, bucket,
+access keys, path-style flag when required by the provider, and asset limits
+listed above, then use:
 
 ```bash
 npm ci
@@ -181,6 +184,18 @@ the API never proxies file bodies or persists presigned URLs. iOS clients must
 convert HEIC/HEIF images to JPEG before requesting a slot. The MVP backend
 accepts actual JPEG, PNG, and WebP images only and does not retain original
 HEIC/HEIF files.
+
+MVP asset formats are:
+
+- images: JPEG, PNG, and WebP;
+- audio: MP3, safely branded M4A (`audio/x-m4a`), and WAV;
+- documents: PDF, UTF-8 TXT/CSV, DOCX, and XLSX.
+
+Generic `audio/mp4`, MP4 video, legacy DOC/XLS, and HEIC/HEIF are not accepted.
+Asset and report deletion remove database-visible state first while atomically
+persisting every object key in `StorageCleanupTask`. S3 cleanup runs
+immediately when possible; temporary failures remain durable and are retried
+lazily on later upload requests.
 
 See [Auth API](docs/api.md) for request and response examples.
 

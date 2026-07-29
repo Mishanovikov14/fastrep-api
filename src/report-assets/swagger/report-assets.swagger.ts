@@ -3,6 +3,7 @@ import {
   ApiBadRequestResponse,
   ApiBearerAuth,
   ApiCreatedResponse,
+  ApiConflictResponse,
   ApiNoContentResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
@@ -40,11 +41,16 @@ export const ApiRequestAssetUpload = () =>
     ApiBadRequestResponse({
       description: 'Invalid type, size, report state, or report limits.',
     }),
+    ApiConflictResponse({
+      description:
+        'UPLOAD_SLOT_CONFLICT: concurrent reservation could not be completed after bounded retries.',
+    }),
     ApiTooManyRequestsResponse({
       description: 'Upload-contract creation rate limit exceeded.',
     }),
     ApiServiceUnavailableResponse({
-      description: 'Object storage is temporarily unavailable.',
+      description:
+        'OBJECT_STORAGE_UNAVAILABLE: object storage is temporarily unavailable.',
     }),
   );
 
@@ -65,7 +71,8 @@ export const ApiConfirmAssetUpload = () =>
       description: 'The upload expired, was rejected, or failed validation.',
     }),
     ApiServiceUnavailableResponse({
-      description: 'Object storage is temporarily unavailable.',
+      description:
+        'OBJECT_STORAGE_UNAVAILABLE: object storage is temporarily unavailable.',
     }),
   );
 
@@ -86,10 +93,7 @@ export const ApiDeleteReportAsset = () =>
     authenticatedEndpoint(),
     ApiOperation({ summary: 'Delete an owned report asset' }),
     ApiNoContentResponse({
-      description: 'The object and database asset were deleted.',
-    }),
-    ApiServiceUnavailableResponse({
       description:
-        'Object cleanup failed; the database record is retained for retry.',
+        'The database asset was deleted. Object cleanup completed immediately or was durably queued for retry.',
     }),
   );

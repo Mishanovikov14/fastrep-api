@@ -15,7 +15,6 @@ const WEBP_MIME = 'image/webp';
 export const inspectAssetBytes = (
   bytes: Uint8Array,
   objectSize: number,
-  declaredMimeType: string,
 ): AssetInspection | null => {
   if (hasPrefix(bytes, [0xff, 0xd8, 0xff])) {
     const dimensions = readJpegDimensions(bytes);
@@ -60,10 +59,9 @@ export const inspectAssetBytes = (
     };
   }
 
-  if (isMp4(bytes)) {
+  if (isM4a(bytes)) {
     return {
-      mimeType:
-        declaredMimeType === 'audio/x-m4a' ? 'audio/x-m4a' : 'audio/mp4',
+      mimeType: 'audio/x-m4a',
       type: ReportAssetType.AUDIO,
       durationSeconds: readMp4Duration(bytes),
     };
@@ -74,14 +72,6 @@ export const inspectAssetBytes = (
       mimeType: 'application/pdf',
       type: ReportAssetType.DOCUMENT,
     };
-  }
-
-  if (hasPrefix(bytes, [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])) {
-    const mimeType =
-      declaredMimeType === 'application/vnd.ms-excel'
-        ? 'application/vnd.ms-excel'
-        : 'application/msword';
-    return { mimeType, type: ReportAssetType.DOCUMENT };
   }
 
   if (
@@ -281,8 +271,25 @@ const readMp3Duration = (
   return undefined;
 };
 
-const isMp4 = (bytes: Uint8Array): boolean =>
-  bytes.length >= 12 && ascii(bytes, 4, 4) === 'ftyp';
+const isM4a = (bytes: Uint8Array): boolean => {
+  if (bytes.length < 16 || ascii(bytes, 4, 4) !== 'ftyp') {
+    return false;
+  }
+
+  const audioBrands = new Set(['M4A ', 'M4B ', 'M4P ']);
+  const boxSize = Math.min(readUint32Be(bytes, 0), bytes.length);
+  if (audioBrands.has(ascii(bytes, 8, 4))) {
+    return true;
+  }
+
+  for (let offset = 16; offset + 4 <= boxSize; offset += 4) {
+    if (audioBrands.has(ascii(bytes, offset, 4))) {
+      return true;
+    }
+  }
+
+  return false;
+};
 
 const readMp4Duration = (bytes: Uint8Array): number | undefined => {
   const marker = findAscii(bytes, 'mvhd');

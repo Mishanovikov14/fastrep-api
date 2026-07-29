@@ -1,9 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
-import {
-  BadRequestException,
-  NotFoundException,
-  ServiceUnavailableException,
-} from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import {
   ReportAsset,
   ReportAssetStatus,
@@ -12,6 +8,7 @@ import {
 } from '../../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ObjectStorageService } from '../storage/object-storage.service';
+import { StorageCleanupService } from '../storage/storage-cleanup.service';
 import { ReportAssetLimitsService } from './report-asset-limits.service';
 import { ReportAssetsService } from './report-assets.service';
 
@@ -56,6 +53,24 @@ const webp = (): Uint8Array => {
   return bytes;
 };
 
+const m4a = (): Uint8Array => {
+  const bytes = new Uint8Array(24);
+  new DataView(bytes.buffer).setUint32(0, bytes.length);
+  bytes.set(Buffer.from('ftyp'), 4);
+  bytes.set(Buffer.from('M4A '), 8);
+  bytes.set(Buffer.from('M4A '), 16);
+  return bytes;
+};
+
+const mp4Video = (): Uint8Array => {
+  const bytes = new Uint8Array(24);
+  new DataView(bytes.buffer).setUint32(0, bytes.length);
+  bytes.set(Buffer.from('ftyp'), 4);
+  bytes.set(Buffer.from('isom'), 8);
+  bytes.set(Buffer.from('mp42'), 16);
+  return bytes;
+};
+
 describe('ReportAssetsService', () => {
   let service: ReportAssetsService;
   let reportDelegate: {
@@ -66,6 +81,7 @@ describe('ReportAssetsService', () => {
     deleteMany: jest.Mock;
     findFirst: jest.Mock;
     findMany: jest.Mock;
+    findUnique: jest.Mock;
     findUniqueOrThrow: jest.Mock;
     updateMany: jest.Mock;
   };
@@ -75,6 +91,15 @@ describe('ReportAssetsService', () => {
     readInspectionBytes: jest.Mock;
     deleteObject: jest.Mock;
   };
+  let storageCleanup: {
+    enqueueAndAttempt: jest.Mock;
+    attemptMany: jest.Mock;
+    retryPending: jest.Mock;
+  };
+  let cleanupTaskDelegate: {
+    upsert: jest.Mock;
+  };
+  let transactionMock: jest.Mock;
   let limits: {
     maximumBytes: jest.Mock;
     maximumCount: jest.Mock;
@@ -97,6 +122,7 @@ describe('ReportAssetsService', () => {
       deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
       findFirst: jest.fn(),
       findMany: jest.fn().mockResolvedValue([]),
+      findUnique: jest.fn(),
       findUniqueOrThrow: jest.fn(),
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     };
@@ -110,6 +136,14 @@ describe('ReportAssetsService', () => {
       headObject: jest.fn(),
       readInspectionBytes: jest.fn(),
       deleteObject: jest.fn().mockResolvedValue(undefined),
+    };
+    storageCleanup = {
+      enqueueAndAttempt: jest.fn().mockResolvedValue(true),
+      attemptMany: jest.fn().mockResolvedValue(undefined),
+      retryPending: jest.fn().mockResolvedValue(0),
+    };
+    cleanupTaskDelegate = {
+      upsert: jest.fn().mockResolvedValue({ id: 'cleanup-id' }),
     };
     limits = {
       maximumBytes: jest.fn((type: ReportAssetType) => {
@@ -129,25 +163,30 @@ describe('ReportAssetsService', () => {
       maximumAudioDurationSeconds: jest.fn().mockReturnValue(1200),
       pendingUploadTtlMinutes: jest.fn().mockReturnValue(30),
     };
+    transactionMock = jest.fn(
+      (
+        callback: (transaction: {
+          report: typeof reportDelegate;
+          reportAsset: typeof assetDelegate;
+          storageCleanupTask: typeof cleanupTaskDelegate;
+        }) => Promise<unknown>,
+      ) =>
+        callback({
+          report: reportDelegate,
+          reportAsset: assetDelegate,
+          storageCleanupTask: cleanupTaskDelegate,
+        }),
+    );
     const prisma = {
       report: reportDelegate,
       reportAsset: assetDelegate,
-      $transaction: jest.fn(
-        (
-          callback: (transaction: {
-            report: typeof reportDelegate;
-            reportAsset: typeof assetDelegate;
-          }) => Promise<unknown>,
-        ) =>
-          callback({
-            report: reportDelegate,
-            reportAsset: assetDelegate,
-          }),
-      ),
+      storageCleanupTask: cleanupTaskDelegate,
+      $transaction: transactionMock,
     } as unknown as PrismaService;
     service = new ReportAssetsService(
       prisma,
       storage as unknown as ObjectStorageService,
+      storageCleanup as unknown as StorageCleanupService,
       limits as unknown as ReportAssetLimitsService,
     );
   });
@@ -253,6 +292,25 @@ describe('ReportAssetsService', () => {
       });
     });
 
+    it.each(['audio/mp4', 'application/msword', 'application/vnd.ms-excel'])(
+      'rejects removed unsafe MVP MIME %s',
+      async (mimeType) => {
+        const type = mimeType.startsWith('audio/')
+          ? ReportAssetType.AUDIO
+          : ReportAssetType.DOCUMENT;
+        await expect(
+          service.requestUpload('user-id', 'report-id', {
+            type,
+            fileName: 'unsupported',
+            mimeType,
+            size: 100,
+          }),
+        ).rejects.toMatchObject({
+          response: { code: 'UNSUPPORTED_ASSET_TYPE' },
+        });
+      },
+    );
+
     it.each([
       [ReportAssetType.IMAGE, 'image/jpeg', 10_485_761],
       [ReportAssetType.AUDIO, 'audio/mpeg', 52_428_801],
@@ -307,6 +365,35 @@ describe('ReportAssetsService', () => {
         response: { code: 'REPORT_STORAGE_LIMIT_EXCEEDED' },
       });
     });
+
+    it('retries serializable P2034 conflicts before creating a slot', async () => {
+      assetDelegate.findMany
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]);
+      transactionMock.mockRejectedValueOnce({ code: 'P2034' });
+
+      await expect(
+        service.requestUpload('user-id', 'report-id', request),
+      ).resolves.toMatchObject({ upload: { method: 'POST' } });
+      expect(transactionMock).toHaveBeenCalledTimes(2);
+      expect(assetDelegate.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns a stable conflict after bounded P2034 retries', async () => {
+      assetDelegate.findMany.mockResolvedValueOnce([]);
+      transactionMock
+        .mockRejectedValueOnce({ code: 'P2034' })
+        .mockRejectedValueOnce({ code: 'P2034' })
+        .mockRejectedValueOnce({ code: 'P2034' });
+
+      await expect(
+        service.requestUpload('user-id', 'report-id', request),
+      ).rejects.toMatchObject({
+        response: { code: 'UPLOAD_SLOT_CONFLICT' },
+        status: 409,
+      });
+      expect(transactionMock).toHaveBeenCalledTimes(3);
+    });
   });
 
   describe('confirmUpload', () => {
@@ -354,6 +441,49 @@ describe('ReportAssetsService', () => {
       );
     });
 
+    it('accepts a safely branded M4A file', async () => {
+      const bytes = m4a();
+      preparePending(bytes, {
+        type: ReportAssetType.AUDIO,
+        declaredMimeType: 'audio/x-m4a',
+      });
+
+      await expect(
+        service.confirmUpload('user-id', 'report-id', 'asset-id'),
+      ).resolves.toMatchObject({
+        status: ReportAssetStatus.READY,
+        verifiedMimeType: 'audio/x-m4a',
+      });
+    });
+
+    it('rejects ordinary MP4 video disguised as audio', async () => {
+      const bytes = mp4Video();
+      preparePending(bytes, {
+        type: ReportAssetType.AUDIO,
+        declaredMimeType: 'audio/x-m4a',
+      });
+
+      await expect(
+        service.confirmUpload('user-id', 'report-id', 'asset-id'),
+      ).rejects.toMatchObject({
+        response: { code: 'UPLOAD_CONTENT_MISMATCH' },
+      });
+    });
+
+    it('rejects safely branded M4A with a mismatched declared MIME', async () => {
+      const bytes = m4a();
+      preparePending(bytes, {
+        type: ReportAssetType.AUDIO,
+        declaredMimeType: 'audio/mpeg',
+      });
+
+      await expect(
+        service.confirmUpload('user-id', 'report-id', 'asset-id'),
+      ).rejects.toMatchObject({
+        response: { code: 'UPLOAD_CONTENT_MISMATCH' },
+      });
+    });
+
     it('rejects a missing object and marks the upload rejected', async () => {
       preparePending(jpeg);
       storage.headObject.mockResolvedValue(null);
@@ -363,7 +493,7 @@ describe('ReportAssetsService', () => {
       ).rejects.toMatchObject({
         response: { code: 'UPLOAD_NOT_FOUND' },
       });
-      expect(storage.deleteObject).toHaveBeenCalled();
+      expect(storageCleanup.enqueueAndAttempt).toHaveBeenCalled();
       expect(assetDelegate.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
@@ -393,7 +523,7 @@ describe('ReportAssetsService', () => {
       ).rejects.toMatchObject({
         response: { code: 'ASSET_TOO_LARGE' },
       });
-      expect(storage.deleteObject).toHaveBeenCalled();
+      expect(storageCleanup.enqueueAndAttempt).toHaveBeenCalled();
     });
 
     it('rejects and deletes a declared JPEG containing PDF data', async () => {
@@ -405,7 +535,7 @@ describe('ReportAssetsService', () => {
       ).rejects.toMatchObject({
         response: { code: 'UPLOAD_CONTENT_MISMATCH' },
       });
-      expect(storage.deleteObject).toHaveBeenCalled();
+      expect(storageCleanup.enqueueAndAttempt).toHaveBeenCalled();
     });
 
     it('rejects excessive detected image dimensions', async () => {
@@ -417,7 +547,7 @@ describe('ReportAssetsService', () => {
       ).rejects.toMatchObject({
         response: { code: 'INVALID_IMAGE_DIMENSIONS' },
       });
-      expect(storage.deleteObject).toHaveBeenCalled();
+      expect(storageCleanup.enqueueAndAttempt).toHaveBeenCalled();
     });
 
     it('returns an already-ready asset without touching storage', async () => {
@@ -479,29 +609,66 @@ describe('ReportAssetsService', () => {
     );
   });
 
-  it('deletes storage before deleting asset metadata', async () => {
+  it('deletes asset metadata and dispatches durable object cleanup', async () => {
     const asset = createAsset({ status: ReportAssetStatus.READY });
     assetDelegate.findFirst.mockResolvedValue(asset);
 
     await service.delete('user-id', 'report-id', 'asset-id');
 
-    expect(storage.deleteObject).toHaveBeenCalledWith(asset.storageKey);
+    expect(cleanupTaskDelegate.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { storageKey: asset.storageKey },
+      }),
+    );
     expect(assetDelegate.deleteMany).toHaveBeenCalledWith({
       where: { id: 'asset-id', reportId: 'report-id' },
     });
-    expect(storage.deleteObject.mock.invocationCallOrder[0]).toBeLessThan(
-      assetDelegate.deleteMany.mock.invocationCallOrder[0],
-    );
+    expect(storageCleanup.attemptMany).toHaveBeenCalledWith([asset.storageKey]);
   });
 
-  it('retains asset metadata when storage deletion fails', async () => {
-    assetDelegate.findFirst.mockResolvedValue(createAsset());
-    storage.deleteObject.mockRejectedValue(new Error('provider detail'));
+  it('succeeds when the asset object is already missing', async () => {
+    const asset = createAsset();
+    assetDelegate.findFirst.mockResolvedValue(asset);
+    storageCleanup.attemptMany.mockResolvedValue(undefined);
 
     await expect(
       service.delete('user-id', 'report-id', 'asset-id'),
-    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+    ).resolves.toBeUndefined();
+    expect(assetDelegate.deleteMany).toHaveBeenCalled();
+  });
+
+  it('does not block deletion when immediate storage cleanup is temporarily unavailable', async () => {
+    const asset = createAsset();
+    assetDelegate.findFirst.mockResolvedValue(asset);
+    storageCleanup.attemptMany.mockRejectedValue(new Error('temporary'));
+
+    await expect(
+      service.delete('user-id', 'report-id', 'asset-id'),
+    ).resolves.toBeUndefined();
+    expect(cleanupTaskDelegate.upsert).toHaveBeenCalled();
+    expect(assetDelegate.deleteMany).toHaveBeenCalled();
+  });
+
+  it('is idempotent after an asset has already been removed', async () => {
+    assetDelegate.findFirst.mockResolvedValue(null);
+    assetDelegate.findUnique.mockResolvedValue(null);
+
+    await expect(
+      service.delete('user-id', 'report-id', 'asset-id'),
+    ).resolves.toBeUndefined();
+    await expect(
+      service.delete('user-id', 'report-id', 'asset-id'),
+    ).resolves.toBeUndefined();
     expect(assetDelegate.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('still returns 404 for an asset belonging to another report', async () => {
+    assetDelegate.findFirst.mockResolvedValue(null);
+    assetDelegate.findUnique.mockResolvedValue({ id: 'asset-id' });
+
+    await expect(
+      service.delete('user-id', 'report-id', 'asset-id'),
+    ).rejects.toBeInstanceOf(NotFoundException);
   });
 
   it('cleans expired pending uploads while leaving active uploads intact', async () => {
@@ -516,7 +683,10 @@ describe('ReportAssetsService', () => {
     await expect(
       service.cleanupExpiredPendingUploads('report-id'),
     ).resolves.toBe(1);
-    expect(storage.deleteObject).toHaveBeenCalledWith(expired.storageKey);
+    expect(storageCleanup.enqueueAndAttempt).toHaveBeenCalledWith(
+      expired.storageKey,
+      'EXPIRED_UPLOAD',
+    );
     expect(assetDelegate.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
@@ -530,28 +700,14 @@ describe('ReportAssetsService', () => {
     );
   });
 
-  it('keeps a stale pending record available when object cleanup fails', async () => {
+  it('keeps a stale pending record available when cleanup queueing fails', async () => {
     assetDelegate.findMany.mockResolvedValue([
       { id: 'expired', storageKey: 'known-storage-key' },
     ]);
-    storage.deleteObject.mockRejectedValue(new Error('temporary'));
+    storageCleanup.enqueueAndAttempt.mockRejectedValue(new Error('temporary'));
 
     await expect(service.cleanupExpiredPendingUploads()).resolves.toBe(0);
     expect(assetDelegate.updateMany).not.toHaveBeenCalled();
-  });
-
-  it('aborts report metadata deletion preparation when any object fails', async () => {
-    assetDelegate.findMany.mockResolvedValue([
-      { storageKey: 'first' },
-      { storageKey: 'second' },
-    ]);
-    storage.deleteObject
-      .mockResolvedValueOnce(undefined)
-      .mockRejectedValueOnce(new Error('temporary'));
-
-    await expect(
-      service.deleteObjectsForReport('user-id', 'report-id'),
-    ).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 
   it('returns controlled errors without provider implementation details', async () => {
@@ -564,6 +720,7 @@ describe('ReportAssetsService', () => {
       service.confirmUpload('user-id', 'report-id', 'asset-id'),
     ).rejects.toMatchObject({
       response: {
+        code: 'OBJECT_STORAGE_UNAVAILABLE',
         message: 'Object storage is temporarily unavailable',
       },
     });

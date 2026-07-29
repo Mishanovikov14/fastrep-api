@@ -1,8 +1,8 @@
 # Database
 
-FastRep uses PostgreSQL through Prisma. Authentication state includes `User`,
-`PendingRegistration`, `RefreshToken`, `PasswordResetRequest`, `Report`, and
-`ReportAsset`.
+FastRep uses PostgreSQL through Prisma. Persisted application state includes
+`User`, `PendingRegistration`, `RefreshToken`, `PasswordResetRequest`,
+`Report`, `ReportAsset`, and `StorageCleanupTask`.
 
 ## User
 
@@ -78,9 +78,24 @@ resolved through `Report.userId`. The report relation uses `onDelete: Cascade`.
 Indexes support ordered report listing and pending cleanup; `storageKey` is
 unique.
 
-Rejected records are retained so a failed storage deletion still has a known
-key that can be retried. Report deletion removes known objects before deleting
-the report row and allowing the database cascade to remove asset metadata.
+Rejected records retain validation history. Object-deletion reliability does
+not depend on the asset row: `StorageCleanupTask` durably owns keys pending
+cleanup.
+
+## StorageCleanupTask
+
+Each task contains a unique private `storageKey`, cleanup reason
+(`ASSET_DELETE`, `REPORT_DELETE`, `REJECTED_UPLOAD`, or `EXPIRED_UPLOAD`),
+attempt count, last-attempt time, and timestamps. It intentionally has no
+foreign key to `ReportAsset` or `Report`, so database cascades cannot discard a
+key that still needs object cleanup.
+
+Asset deletion creates/updates the cleanup task and deletes asset metadata in
+one transaction. Report deletion copies every owned key into tasks and deletes
+the report in one serializable transaction; the normal report-to-asset cascade
+then applies. Successful S3 deletion removes the task. Temporary failures
+retain it for lazy retry and produce a structured log containing the cleanup
+task ID and stable internal error code, not provider details.
 
 ## Schema changes and migrations
 

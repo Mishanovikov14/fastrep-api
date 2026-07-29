@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -10,9 +12,11 @@ import {
   ReportAssetStatus,
   ReportAssetType,
   ReportStatus,
+  StorageCleanupReason,
 } from '../../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ObjectStorageService } from '../storage/object-storage.service';
+import { StorageCleanupService } from '../storage/storage-cleanup.service';
 import { StoredObjectMetadata } from '../storage/storage.types';
 import { inspectAssetBytes } from './asset-file-inspector';
 import { RequestAssetUploadDto } from './dto/request-asset-upload.dto';
@@ -31,11 +35,16 @@ type AssetForVerification = ReportAssetRecord & {
   storageKey: string;
 };
 
+const SERIALIZABLE_TRANSACTION_ATTEMPTS = 3;
+
 @Injectable()
 export class ReportAssetsService {
+  private readonly logger = new Logger(ReportAssetsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly storage: ObjectStorageService,
+    private readonly storageCleanup: StorageCleanupService,
     private readonly limits: ReportAssetLimitsService,
   ) {}
 
@@ -61,6 +70,7 @@ export class ReportAssetsService {
     }
 
     this.validateDeclaredUpload(dto);
+    await this.retryDeferredCleanup();
     await this.cleanupExpiredPendingUploads(reportId);
 
     const assetId = randomUUID();
@@ -167,15 +177,11 @@ export class ReportAssetsService {
       throw this.storageUnavailable();
     }
 
-    const inspection = inspectAssetBytes(
-      inspectionBytes,
-      metadata.size,
-      asset.declaredMimeType,
-    );
+    const inspection = inspectAssetBytes(inspectionBytes, metadata.size);
     if (
       !inspection ||
       inspection.type !== asset.type ||
-      !this.mimeTypesMatch(asset.declaredMimeType, inspection.mimeType)
+      asset.declaredMimeType !== inspection.mimeType
     ) {
       return this.rejectUpload(
         asset,
@@ -267,35 +273,46 @@ export class ReportAssetsService {
     reportId: string,
     assetId: string,
   ): Promise<void> {
-    const asset = await this.findOwnedAsset(userId, reportId, assetId);
+    await this.assertOwnedReport(userId, reportId);
+    const asset = await this.prisma.reportAsset.findFirst({
+      where: { id: assetId, reportId },
+      select: { id: true, storageKey: true },
+    });
 
-    try {
-      await this.storage.deleteObject(asset.storageKey);
-    } catch {
-      throw this.storageUnavailable();
+    if (!asset) {
+      const foreignAsset = await this.prisma.reportAsset.findUnique({
+        where: { id: assetId },
+        select: { id: true },
+      });
+      if (foreignAsset) {
+        throw new NotFoundException('Report asset not found');
+      }
+
+      return;
     }
 
-    await this.prisma.reportAsset.deleteMany({
-      where: { id: assetId, reportId },
+    await this.prisma.$transaction(async (transaction) => {
+      await transaction.storageCleanupTask.upsert({
+        where: { storageKey: asset.storageKey },
+        create: {
+          storageKey: asset.storageKey,
+          reason: StorageCleanupReason.ASSET_DELETE,
+        },
+        update: { reason: StorageCleanupReason.ASSET_DELETE },
+      });
+      await transaction.reportAsset.deleteMany({
+        where: { id: assetId, reportId },
+      });
     });
-  }
 
-  async deleteObjectsForReport(
-    userId: string,
-    reportId: string,
-  ): Promise<void> {
-    const assets = await this.prisma.reportAsset.findMany({
-      where: { reportId, report: { userId } },
-      select: { storageKey: true },
-    });
-
-    const deletions = await Promise.allSettled(
-      assets.map((asset) => this.storage.deleteObject(asset.storageKey)),
-    );
-    if (deletions.some((result) => result.status === 'rejected')) {
-      throw new ServiceUnavailableException(
-        'Report asset cleanup is temporarily unavailable',
-      );
+    try {
+      await this.storageCleanup.attemptMany([asset.storageKey]);
+    } catch {
+      this.logger.warn({
+        event: 'storage_cleanup_dispatch_failed',
+        assetId,
+        errorCode: 'STORAGE_CLEANUP_DISPATCH_FAILED',
+      });
     }
   }
 
@@ -312,7 +329,10 @@ export class ReportAssetsService {
 
     for (const asset of expired) {
       try {
-        await this.storage.deleteObject(asset.storageKey);
+        await this.storageCleanup.enqueueAndAttempt(
+          asset.storageKey,
+          StorageCleanupReason.EXPIRED_UPLOAD,
+        );
         const updated = await this.prisma.reportAsset.updateMany({
           where: {
             id: asset.id,
@@ -325,7 +345,11 @@ export class ReportAssetsService {
         });
         cleaned += updated.count;
       } catch {
-        // Keep the storage key in the pending record so a later cleanup can retry.
+        this.logger.warn({
+          event: 'expired_upload_cleanup_deferred',
+          assetId: asset.id,
+          errorCode: 'STORAGE_CLEANUP_QUEUE_FAILED',
+        });
       }
     }
 
@@ -355,85 +379,106 @@ export class ReportAssetsService {
     storageKey: string,
     dto: RequestAssetUploadDto,
   ): Promise<void> {
-    await this.prisma.$transaction(
-      async (transaction) => {
-        const report = await transaction.report.findFirst({
-          where: { id: reportId, userId },
-          select: { id: true, status: true },
-        });
-        if (!report) {
-          throw new NotFoundException('Report not found');
-        }
-        if (report.status !== ReportStatus.DRAFT) {
-          throw this.assetError(
-            ASSET_ERROR_CODES.assetNotReady,
-            'Report assets can only be changed while the report is a draft',
-          );
-        }
+    for (
+      let attempt = 1;
+      attempt <= SERIALIZABLE_TRANSACTION_ATTEMPTS;
+      attempt += 1
+    ) {
+      try {
+        await this.prisma.$transaction(
+          async (transaction) => {
+            const report = await transaction.report.findFirst({
+              where: { id: reportId, userId },
+              select: { id: true, status: true },
+            });
+            if (!report) {
+              throw new NotFoundException('Report not found');
+            }
+            if (report.status !== ReportStatus.DRAFT) {
+              throw this.assetError(
+                ASSET_ERROR_CODES.assetNotReady,
+                'Report assets can only be changed while the report is a draft',
+              );
+            }
 
-        const activeAssets = await transaction.reportAsset.findMany({
-          where: {
-            reportId,
-            OR: [
-              { status: ReportAssetStatus.READY },
-              {
-                status: ReportAssetStatus.PENDING_UPLOAD,
-                createdAt: { gte: this.pendingCutoff() },
+            const activeAssets = await transaction.reportAsset.findMany({
+              where: {
+                reportId,
+                OR: [
+                  { status: ReportAssetStatus.READY },
+                  {
+                    status: ReportAssetStatus.PENDING_UPLOAD,
+                    createdAt: { gte: this.pendingCutoff() },
+                  },
+                ],
               },
-            ],
-          },
-          select: {
-            type: true,
-            declaredSize: true,
-            verifiedSize: true,
-            position: true,
-          },
-        });
+              select: {
+                type: true,
+                declaredSize: true,
+                verifiedSize: true,
+                position: true,
+              },
+            });
 
-        const typeCount = activeAssets.filter(
-          (asset) => asset.type === dto.type,
-        ).length;
-        if (typeCount >= this.limits.maximumCount(dto.type)) {
-          throw this.assetError(
-            ASSET_ERROR_CODES.reportAssetLimit,
-            `The report has reached its ${dto.type.toLowerCase()} asset limit`,
-          );
-        }
+            const typeCount = activeAssets.filter(
+              (asset) => asset.type === dto.type,
+            ).length;
+            if (typeCount >= this.limits.maximumCount(dto.type)) {
+              throw this.assetError(
+                ASSET_ERROR_CODES.reportAssetLimit,
+                `The report has reached its ${dto.type.toLowerCase()} asset limit`,
+              );
+            }
 
-        const reservedBytes = activeAssets.reduce(
-          (total, asset) => total + (asset.verifiedSize ?? asset.declaredSize),
-          0,
+            const reservedBytes = activeAssets.reduce(
+              (total, asset) =>
+                total + (asset.verifiedSize ?? asset.declaredSize),
+              0,
+            );
+            if (reservedBytes + dto.size > this.limits.maximumReportBytes()) {
+              throw this.assetError(
+                ASSET_ERROR_CODES.reportStorageLimit,
+                'The report storage limit would be exceeded',
+              );
+            }
+
+            const position =
+              activeAssets.reduce(
+                (maximum, asset) => Math.max(maximum, asset.position),
+                -1,
+              ) + 1;
+            await transaction.reportAsset.create({
+              data: {
+                id: assetId,
+                reportId,
+                type: dto.type,
+                status: ReportAssetStatus.PENDING_UPLOAD,
+                storageKey,
+                originalFileName: this.sanitizeFileName(dto.fileName),
+                declaredMimeType: dto.mimeType,
+                declaredSize: dto.size,
+                position,
+              },
+            });
+          },
+          {
+            isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+          },
         );
-        if (reservedBytes + dto.size > this.limits.maximumReportBytes()) {
-          throw this.assetError(
-            ASSET_ERROR_CODES.reportStorageLimit,
-            'The report storage limit would be exceeded',
-          );
+        return;
+      } catch (error: unknown) {
+        if (!this.isPrismaError(error, 'P2034')) {
+          throw error;
         }
 
-        const position =
-          activeAssets.reduce(
-            (maximum, asset) => Math.max(maximum, asset.position),
-            -1,
-          ) + 1;
-        await transaction.reportAsset.create({
-          data: {
-            id: assetId,
-            reportId,
-            type: dto.type,
-            status: ReportAssetStatus.PENDING_UPLOAD,
-            storageKey,
-            originalFileName: this.sanitizeFileName(dto.fileName),
-            declaredMimeType: dto.mimeType,
-            declaredSize: dto.size,
-            position,
-          },
-        });
-      },
-      {
-        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-      },
-    );
+        if (attempt === SERIALIZABLE_TRANSACTION_ATTEMPTS) {
+          throw new ConflictException({
+            code: ASSET_ERROR_CODES.uploadSlotConflict,
+            message: 'The upload slot could not be reserved; retry the request',
+          });
+        }
+      }
+    }
   }
 
   private async findOwnedAsset(
@@ -479,12 +524,10 @@ export class ReportAssetsService {
     code: string,
     message: string,
   ): Promise<never> {
-    let deletionFailed = false;
-    try {
-      await this.storage.deleteObject(asset.storageKey);
-    } catch {
-      deletionFailed = true;
-    }
+    await this.storageCleanup.enqueueAndAttempt(
+      asset.storageKey,
+      StorageCleanupReason.REJECTED_UPLOAD,
+    );
 
     await this.prisma.reportAsset.updateMany({
       where: {
@@ -493,7 +536,7 @@ export class ReportAssetsService {
       },
       data: {
         status: ReportAssetStatus.REJECTED,
-        rejectionReason: deletionFailed ? `CLEANUP_REQUIRED:${code}` : code,
+        rejectionReason: code,
       },
     });
 
@@ -518,16 +561,6 @@ export class ReportAssetsService {
       createdAt: asset.createdAt,
       updatedAt: asset.updatedAt,
     };
-  }
-
-  private mimeTypesMatch(declared: string, verified: string): boolean {
-    if (declared === verified) {
-      return true;
-    }
-
-    return [declared, verified].every((mimeType) =>
-      ['audio/mp4', 'audio/x-m4a'].includes(mimeType),
-    );
   }
 
   private pendingCutoff(): Date {
@@ -555,8 +588,29 @@ export class ReportAssetsService {
   }
 
   private storageUnavailable(): ServiceUnavailableException {
-    return new ServiceUnavailableException(
-      'Object storage is temporarily unavailable',
+    return new ServiceUnavailableException({
+      code: ASSET_ERROR_CODES.storageUnavailable,
+      message: 'Object storage is temporarily unavailable',
+    });
+  }
+
+  private isPrismaError(error: unknown, code: string): boolean {
+    return (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      error.code === code
     );
+  }
+
+  private async retryDeferredCleanup(): Promise<void> {
+    try {
+      await this.storageCleanup.retryPending();
+    } catch {
+      this.logger.warn({
+        event: 'storage_cleanup_retry_failed',
+        errorCode: 'STORAGE_CLEANUP_RETRY_FAILED',
+      });
+    }
   }
 }
