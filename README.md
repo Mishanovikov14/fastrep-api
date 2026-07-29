@@ -158,6 +158,19 @@ npm run verify
 
 `npm run verify` runs lint, build, and unit tests. E2E tests are a separate command.
 
+The opt-in production S3 smoke test uses Railway-injected production storage
+variables while keeping report and authentication state in memory:
+
+```bash
+railway run --no-local -- npm run test:s3:production
+```
+
+It requests a presigned POST through the report-assets HTTP API, uploads one
+uniquely named JPEG to the private production bucket, verifies and confirms it,
+then deletes it through the API. A direct, idempotent cleanup runs after every
+attempt and verifies that the object is absent. This test writes to production
+storage, requires project-scoped Railway access, and must not run in routine CI.
+
 ## Current API scope
 
 Authentication includes:
