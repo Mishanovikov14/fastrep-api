@@ -20,10 +20,17 @@ enqueue failure, queued cancellation, and terminal dependency failure release
 it. Unique operation keys prevent double reservation, consumption, and
 release.
 
-Choose grants by nearest expiry, then subscription-period grants, then
-non-expiring purchased grants. Make monthly allocation unique by subscription
-period and purchases unique by external purchase ID. Keep `User.isPremium`
-only for compatibility.
+Partial unique indexes additionally enforce one `RESERVE` and one mutually
+exclusive terminal action (`CONSUME`, `RELEASE`, or `REFUND`) per generation.
+Generation lifecycle restoration always uses `RELEASE`. `REFUND` is retained
+only for a future external-payment reimbursement and is not interchangeable
+with release.
+
+Choose grants by nearest expiry, then subscription-period credits ahead of
+promotional/admin credits with equal expiry, then non-expiring purchased packs
+last. Use `createdAt` and ID as an explicit total tie-break. Make monthly
+allocation unique by subscription period and purchases unique by external
+purchase ID. Keep `User.isPremium` only for compatibility.
 
 ## Consequences
 

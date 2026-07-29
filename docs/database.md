@@ -110,11 +110,22 @@ at most one `QUEUED`/`PROCESSING` generation per report and per user;
 serializable transactions and bounded `P2034` retries are the application-side
 concurrency strategy.
 
+`enqueuedAt` distinguishes a committed `QUEUED` row from one acknowledged by
+BullMQ. `priorReportStatus` lets enqueue-failure compensation and queued
+cancellation restore `DRAFT` or `FAILED` exactly. Compensation releases the
+reservation and removes the unusable generation atomically. If Redis accepted
+the job but its acknowledgement was lost, the remaining job cannot claim the
+deleted database row.
+
 `GenerationProviderAttempt` is created before moderation, transcription, or
 report generation. It records operation, optional asset, attempt number,
 status, provider/model/request ID, token or audio usage, sanitized error code,
-and timestamps. The worker checks this durable ledger before a provider call,
-so BullMQ retries and SDK retries cannot exceed configured budgets.
+owning processing token, lease expiry, and timestamps. A live `STARTED` row
+blocks duplicate provider work. An expired `STARTED` row is atomically marked
+failed with `AI_PROVIDER_ATTEMPT_STALE`; it remains counted, and recovery can
+use only the next configured slot. Completed state is resumed. Together with
+SDK `maxRetries=0`, the ledger prevents BullMQ redelivery and worker restarts
+from resetting provider-call budgets.
 
 Deleting a report cascades generations and provider attempts as deliberate
 user-requested data erasure. Credit transactions use `onDelete: SetNull` for
@@ -149,6 +160,13 @@ idempotency key. Generation creation decrements one selected grant and writes
 failure, queued cancellation, or terminal dependency failure restores the
 grant and writes one `RELEASE`. Nearest-expiring grants are selected first,
 then subscription-period credits, then non-expiring purchased packs.
+
+Partial unique indexes enforce exactly one `RESERVE` and at most one terminal
+`CONSUME`/`RELEASE`/`REFUND` for each generation. `RELEASE` is the policy for
+an unused generation reservation. `REFUND` remains separate for a future
+reimbursement after an external charge and is not written by the generation
+lifecycle. The shared terminal constraint makes these outcomes mutually
+exclusive and prevents balance restoration after consumption.
 
 ## Schema changes and migrations
 

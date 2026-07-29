@@ -23,6 +23,7 @@ const validProductionSettings = {
   OPENAI_TRANSCRIPTION_MODEL: 'gpt-4o-mini-transcribe',
   PORT: '3000',
   SWAGGER_ENABLED: 'false',
+  AI_GENERATION_ENABLED: 'true',
 };
 
 describe('validateEnvironment', () => {
@@ -67,6 +68,8 @@ describe('validateEnvironment', () => {
       GENERATION_DAILY_SAFETY_LIMIT: '20',
       AI_GLOBAL_DAILY_GENERATION_LIMIT: '500',
       REPORT_OUTPUT_MAX_BYTES: '52428800',
+      REPORT_PDF_MAX_PAGES: '100',
+      REPORT_PDF_MAX_IMAGE_BYTES: '52428800',
       DOWNLOAD_URL_TTL_SECONDS: '600',
       AI_GENERATION_ENABLED: 'true',
       ENABLE_DEV_CREDIT_GRANTS: 'false',
@@ -100,8 +103,8 @@ describe('validateEnvironment', () => {
       validateEnvironment({
         ...validEnvironment,
         NODE_ENV: 'production',
-        PORT: '3000',
-        SWAGGER_ENABLED: 'false',
+        ...validProductionSettings,
+        RESEND_API_KEY: '',
       }),
     ).toThrow('RESEND_API_KEY is required');
   });
@@ -111,10 +114,8 @@ describe('validateEnvironment', () => {
       validateEnvironment({
         ...validEnvironment,
         NODE_ENV: 'production',
-        RESEND_API_KEY: 'test-key',
-        EMAIL_FROM: 'FastRep <no-reply@example.com>',
-        PORT: '3000',
-        SWAGGER_ENABLED: 'false',
+        ...validProductionSettings,
+        S3_ENDPOINT: '',
       }),
     ).toThrow('S3_ENDPOINT is required');
   });
@@ -148,6 +149,8 @@ describe('validateEnvironment', () => {
     'GENERATION_DAILY_SAFETY_LIMIT',
     'AI_GLOBAL_DAILY_GENERATION_LIMIT',
     'REPORT_OUTPUT_MAX_BYTES',
+    'REPORT_PDF_MAX_PAGES',
+    'REPORT_PDF_MAX_IMAGE_BYTES',
     'DOWNLOAD_URL_TTL_SECONDS',
   ])('rejects a non-positive asset setting %s', (key) => {
     expect(() =>
@@ -162,6 +165,15 @@ describe('validateEnvironment', () => {
         S3_FORCE_PATH_STYLE: 'sometimes',
       }),
     ).toThrow('S3_FORCE_PATH_STYLE must be either true or false');
+  });
+
+  it('strictly rejects an invalid generation kill-switch value', () => {
+    expect(() =>
+      validateEnvironment({
+        ...validEnvironment,
+        AI_GENERATION_ENABLED: 'yes',
+      }),
+    ).toThrow('AI_GENERATION_ENABLED must be either true or false');
   });
 
   it('rejects an OpenAI file TTL below the provider minimum', () => {
@@ -202,5 +214,101 @@ describe('validateEnvironment', () => {
     ).toThrow(
       'REGISTRATION_RESEND_COOLDOWN_SECONDS must be at least 60 in production',
     );
+  });
+
+  it('does not require Redis or OpenAI for a production API with generation disabled', () => {
+    expect(
+      validateEnvironment({
+        ...validEnvironment,
+        NODE_ENV: 'production',
+        AI_GENERATION_ENABLED: 'false',
+        RESEND_API_KEY: 'test-key',
+        EMAIL_FROM: 'FastRep <no-reply@example.com>',
+        S3_ENDPOINT: 'https://s3.example.com',
+        S3_REGION: 'us-east-1',
+        S3_BUCKET: 'fastrep-test',
+        S3_ACCESS_KEY_ID: 'test-access-key',
+        S3_SECRET_ACCESS_KEY: 'test-secret-key',
+        PORT: '3000',
+        SWAGGER_ENABLED: 'false',
+      }),
+    ).toMatchObject({ AI_GENERATION_ENABLED: 'false' });
+  });
+
+  it('requires an explicit production kill-switch value', () => {
+    expect(() =>
+      validateEnvironment({
+        ...validEnvironment,
+        NODE_ENV: 'production',
+      }),
+    ).toThrow('AI_GENERATION_ENABLED must be explicit in production');
+  });
+
+  it('starts a production worker without API-only secrets', () => {
+    const workerEnvironment = {
+      DATABASE_URL: 'postgresql://localhost/fastrep',
+      NODE_ENV: 'production',
+      FASTREP_PROCESS_ROLE: 'worker',
+      AI_GENERATION_ENABLED: 'true',
+      S3_ENDPOINT: 'https://s3.example.com',
+      S3_REGION: 'us-east-1',
+      S3_BUCKET: 'fastrep-test',
+      S3_ACCESS_KEY_ID: 'test-access-key',
+      S3_SECRET_ACCESS_KEY: 'test-secret-key',
+      REDIS_URL: 'redis://localhost:6379',
+      REPORT_GENERATION_QUEUE_NAME: 'report-generation',
+      OPENAI_API_KEY: 'test-openai-key',
+      OPENAI_REPORT_MODEL: 'gpt-5-mini',
+      OPENAI_TRANSCRIPTION_MODEL: 'gpt-4o-mini-transcribe',
+    };
+
+    expect(validateEnvironment(workerEnvironment)).toMatchObject({
+      FASTREP_PROCESS_ROLE: 'worker',
+    });
+  });
+
+  it('requires an explicit shared queue name for a production worker', () => {
+    expect(() =>
+      validateEnvironment({
+        DATABASE_URL: 'postgresql://localhost/fastrep',
+        NODE_ENV: 'production',
+        FASTREP_PROCESS_ROLE: 'worker',
+        AI_GENERATION_ENABLED: 'true',
+        S3_ENDPOINT: 'https://s3.example.com',
+        S3_REGION: 'us-east-1',
+        S3_BUCKET: 'fastrep-test',
+        S3_ACCESS_KEY_ID: 'test-access-key',
+        S3_SECRET_ACCESS_KEY: 'test-secret-key',
+        REDIS_URL: 'redis://localhost:6379',
+        OPENAI_API_KEY: 'test-openai-key',
+        OPENAI_REPORT_MODEL: 'gpt-5-mini',
+        OPENAI_TRANSCRIPTION_MODEL: 'gpt-4o-mini-transcribe',
+      }),
+    ).toThrow('REPORT_GENERATION_QUEUE_NAME is required');
+  });
+
+  it('rejects retry and safety limits outside their finite bounds', () => {
+    expect(() =>
+      validateEnvironment({
+        ...validEnvironment,
+        REPORT_GENERATION_JOB_ATTEMPTS: '6',
+      }),
+    ).toThrow('REPORT_GENERATION_JOB_ATTEMPTS must be between 1 and 5');
+    expect(() =>
+      validateEnvironment({
+        ...validEnvironment,
+        AI_GLOBAL_DAILY_GENERATION_LIMIT: '1000001',
+      }),
+    ).toThrow('AI_GLOBAL_DAILY_GENERATION_LIMIT must be between 1 and 1000000');
+  });
+
+  it('requires signed image URLs to outlive the OpenAI request timeout', () => {
+    expect(() =>
+      validateEnvironment({
+        ...validEnvironment,
+        DOWNLOAD_URL_TTL_SECONDS: '60',
+        OPENAI_REQUEST_TIMEOUT_MS: '61000',
+      }),
+    ).toThrow('DOWNLOAD_URL_TTL_SECONDS must cover OPENAI_REQUEST_TIMEOUT_MS');
   });
 });

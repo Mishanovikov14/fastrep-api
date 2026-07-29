@@ -244,6 +244,8 @@ model ReportGeneration {
   cancelledAt       DateTime?
   processingToken   String?
   processingLeaseExpiresAt DateTime?
+  enqueuedAt        DateTime?
+  priorReportStatus ReportStatus
   createdAt         DateTime               @default(now())
   updatedAt         DateTime               @updatedAt
 
@@ -366,6 +368,8 @@ model GenerationProviderAttempt {
   outputTokens         Int?
   audioDurationSeconds Float?
   errorCode            String?
+  processingToken      String
+  leaseExpiresAt       DateTime
   startedAt            DateTime                        @default(now())
   completedAt          DateTime?
   createdAt            DateTime                        @default(now())

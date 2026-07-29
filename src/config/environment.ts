@@ -74,9 +74,21 @@ const nonNegativeIntegerWithDefault = (
 
 export const validateEnvironment = (environment: Environment): Environment => {
   requireString(environment, 'DATABASE_URL');
-  requireString(environment, 'JWT_ACCESS_SECRET');
-  requireString(environment, 'JWT_REFRESH_SECRET');
   const nodeEnvironment = requireString(environment, 'NODE_ENV');
+  const processRole = environment.FASTREP_PROCESS_ROLE ?? 'api';
+  if (processRole !== 'api' && processRole !== 'worker') {
+    throw new Error('FASTREP_PROCESS_ROLE must be either api or worker');
+  }
+  environment.FASTREP_PROCESS_ROLE = processRole;
+  if (processRole === 'api') {
+    requireString(environment, 'JWT_ACCESS_SECRET');
+    requireString(environment, 'JWT_REFRESH_SECRET');
+  }
+  const generationEnabledWasExplicit =
+    environment.AI_GENERATION_ENABLED !== undefined;
+  const queueNameWasExplicit =
+    typeof environment.REPORT_GENERATION_QUEUE_NAME === 'string' &&
+    environment.REPORT_GENERATION_QUEUE_NAME.trim().length > 0;
   positiveIntegerWithDefault(
     environment,
     'PASSWORD_RESET_CODE_TTL_MINUTES',
@@ -168,6 +180,12 @@ export const validateEnvironment = (environment: Environment): Environment => {
     'REPORT_OUTPUT_MAX_BYTES',
     52_428_800,
   );
+  positiveIntegerWithDefault(environment, 'REPORT_PDF_MAX_PAGES', 100);
+  positiveIntegerWithDefault(
+    environment,
+    'REPORT_PDF_MAX_IMAGE_BYTES',
+    52_428_800,
+  );
   positiveIntegerWithDefault(environment, 'DOWNLOAD_URL_TTL_SECONDS', 600);
   booleanWithDefault(environment, 'AI_GENERATION_ENABLED', true);
   booleanWithDefault(environment, 'ENABLE_DEV_CREDIT_GRANTS', false);
@@ -183,39 +201,130 @@ export const validateEnvironment = (environment: Environment): Environment => {
   if (Number(environment.OPENAI_MAX_RETRIES) !== 0) {
     throw new Error('OPENAI_MAX_RETRIES must be 0');
   }
+  assertIntegerRange(environment, 'OPENAI_REQUEST_TIMEOUT_MS', 1_000, 600_000);
+  assertIntegerRange(
+    environment,
+    'REPORT_GENERATION_JOB_TIMEOUT_MS',
+    60_000,
+    3_600_000,
+  );
+  assertIntegerRange(environment, 'REPORT_GENERATION_JOB_ATTEMPTS', 1, 5);
+  assertIntegerRange(environment, 'REPORT_GENERATION_CONCURRENCY', 1, 20);
+  assertIntegerRange(
+    environment,
+    'AI_MAX_PROVIDER_CALLS_PER_GENERATION',
+    2,
+    10,
+  );
+  assertIntegerRange(
+    environment,
+    'TRANSCRIPTION_MAX_ATTEMPTS_PER_ASSET',
+    2,
+    10,
+  );
+  assertIntegerRange(environment, 'AI_MAX_OUTPUT_TOKENS', 256, 100_000);
+  assertIntegerRange(
+    environment,
+    'GENERATION_START_RATE_WINDOW_SECONDS',
+    60,
+    86_400,
+  );
+  assertIntegerRange(environment, 'DOWNLOAD_URL_TTL_SECONDS', 60, 3_600);
+  if (
+    Number(environment.DOWNLOAD_URL_TTL_SECONDS) * 1_000 <
+    Number(environment.OPENAI_REQUEST_TIMEOUT_MS)
+  ) {
+    throw new Error(
+      'DOWNLOAD_URL_TTL_SECONDS must cover OPENAI_REQUEST_TIMEOUT_MS',
+    );
+  }
+  assertIntegerRange(environment, 'REPORT_PDF_MAX_PAGES', 1, 250);
+  assertIntegerRange(
+    environment,
+    'REPORT_PDF_MAX_IMAGE_BYTES',
+    1_048_576,
+    157_286_400,
+  );
+  assertIntegerRange(
+    environment,
+    'REPORT_GENERATION_BACKOFF_MS',
+    1_000,
+    600_000,
+  );
+  assertIntegerRange(environment, 'GENERATION_START_RATE_LIMIT', 1, 1_000);
+  assertIntegerRange(environment, 'GENERATION_DAILY_SAFETY_LIMIT', 1, 10_000);
+  assertIntegerRange(
+    environment,
+    'AI_GLOBAL_DAILY_GENERATION_LIMIT',
+    1,
+    1_000_000,
+  );
+  assertIntegerRange(
+    environment,
+    'REPORT_OUTPUT_MAX_BYTES',
+    1_048_576,
+    157_286_400,
+  );
 
   if (nodeEnvironment === 'production') {
-    requireString(environment, 'RESEND_API_KEY');
-    requireString(environment, 'EMAIL_FROM');
+    if (!generationEnabledWasExplicit) {
+      throw new Error('AI_GENERATION_ENABLED must be explicit in production');
+    }
+    if (
+      (processRole === 'worker' ||
+        environment.AI_GENERATION_ENABLED === 'true') &&
+      !queueNameWasExplicit
+    ) {
+      throw new Error('REPORT_GENERATION_QUEUE_NAME is required');
+    }
     requireString(environment, 'S3_ENDPOINT');
     requireString(environment, 'S3_REGION');
     requireString(environment, 'S3_BUCKET');
     requireString(environment, 'S3_ACCESS_KEY_ID');
     requireString(environment, 'S3_SECRET_ACCESS_KEY');
-    requireString(environment, 'REDIS_URL');
     requireString(environment, 'REPORT_GENERATION_QUEUE_NAME');
-    if (environment.AI_GENERATION_ENABLED === 'true') {
+    if (
+      processRole === 'worker' ||
+      environment.AI_GENERATION_ENABLED === 'true'
+    ) {
+      requireString(environment, 'REDIS_URL');
       requireString(environment, 'OPENAI_API_KEY');
       requireString(environment, 'OPENAI_REPORT_MODEL');
       requireString(environment, 'OPENAI_TRANSCRIPTION_MODEL');
     }
-    const port = requireString(environment, 'PORT');
-    const swaggerEnabled = requireString(environment, 'SWAGGER_ENABLED');
+    if (processRole === 'api') {
+      requireString(environment, 'RESEND_API_KEY');
+      requireString(environment, 'EMAIL_FROM');
+      const port = requireString(environment, 'PORT');
+      const swaggerEnabled = requireString(environment, 'SWAGGER_ENABLED');
 
-    if (!Number.isInteger(Number(port)) || Number(port) <= 0) {
-      throw new Error('PORT must be a positive integer');
-    }
+      if (!Number.isInteger(Number(port)) || Number(port) <= 0) {
+        throw new Error('PORT must be a positive integer');
+      }
 
-    if (!['true', 'false'].includes(swaggerEnabled)) {
-      throw new Error('SWAGGER_ENABLED must be either true or false');
-    }
+      if (!['true', 'false'].includes(swaggerEnabled)) {
+        throw new Error('SWAGGER_ENABLED must be either true or false');
+      }
 
-    if (Number(environment.REGISTRATION_RESEND_COOLDOWN_SECONDS) < 60) {
-      throw new Error(
-        'REGISTRATION_RESEND_COOLDOWN_SECONDS must be at least 60 in production',
-      );
+      if (Number(environment.REGISTRATION_RESEND_COOLDOWN_SECONDS) < 60) {
+        throw new Error(
+          'REGISTRATION_RESEND_COOLDOWN_SECONDS must be at least 60 in production',
+        );
+      }
     }
   }
 
   return environment;
+};
+
+const assertIntegerRange = (
+  environment: Environment,
+  key: string,
+  minimum: number,
+  maximum: number,
+): void => {
+  const value = Number(environment[key]);
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${key} must be between ${minimum} and ${maximum}`);
+  }
 };

@@ -68,11 +68,7 @@ export class ReportGenerationProcessorService {
     maximumQueueAttempts: number,
   ): Promise<void> {
     const processingToken = randomUUID();
-    const claimed = await this.claim(
-      generationId,
-      processingToken,
-      queueAttempt,
-    );
+    const claimed = await this.claim(generationId, processingToken);
     if (!claimed) {
       return;
     }
@@ -81,6 +77,26 @@ export class ReportGenerationProcessorService {
     const temporaryFileIds: string[] = [];
     const startedAt = Date.now();
     const deadline = startedAt + this.jobTimeoutMs;
+    const abortController = new AbortController();
+    const deadlineTimer = setTimeout(
+      () => abortController.abort(),
+      this.jobTimeoutMs,
+    );
+    deadlineTimer.unref();
+    const heartbeat = setInterval(() => {
+      if (Date.now() >= deadline) {
+        abortController.abort();
+        return;
+      }
+      void this.renewLease(generationId, processingToken)
+        .then((renewed) => {
+          if (!renewed) {
+            abortController.abort();
+          }
+        })
+        .catch(() => abortController.abort());
+    }, this.heartbeatIntervalMs());
+    heartbeat.unref();
     try {
       const generation = await this.prisma.reportGeneration.findUniqueOrThrow({
         where: { id: generationId },
@@ -98,6 +114,7 @@ export class ReportGenerationProcessorService {
         generationId,
         ReportGenerationStage.TRANSCRIBING,
         GENERATION_PROGRESS.TRANSCRIBING,
+        processingToken,
       );
 
       const transcriptEntries: Array<{ assetId: string; text: string }> = [];
@@ -111,6 +128,9 @@ export class ReportGenerationProcessorService {
           generationId,
           asset,
           snapshot.report.language,
+          processingToken,
+          new Date(deadline),
+          abortController.signal,
         );
         transcriptEntries.push({ assetId: asset.id, text });
         const progress =
@@ -120,6 +140,7 @@ export class ReportGenerationProcessorService {
           generationId,
           ReportGenerationStage.TRANSCRIBING,
           progress,
+          processingToken,
         );
       }
 
@@ -127,12 +148,13 @@ export class ReportGenerationProcessorService {
         generationId,
         ReportGenerationStage.ANALYZING,
         GENERATION_PROGRESS.ANALYZING,
+        processingToken,
       );
       const imageAssets = snapshot.assets.filter(
         (asset) => asset.type === ReportAssetType.IMAGE,
       );
       this.assertBeforeDeadline(deadline);
-      const imageInputs = await Promise.all(
+      const moderationImageInputs = await Promise.all(
         imageAssets.map(async (asset) => ({
           assetId: asset.id,
           url: (await this.storage.createPresignedGet(asset.storageKey)).url,
@@ -151,11 +173,14 @@ export class ReportGenerationProcessorService {
           GenerationProviderOperation.MODERATION,
           'openai',
           'omni-moderation-latest',
+          processingToken,
+          new Date(deadline),
         );
         try {
           const moderation = await this.provider.moderate(
             sourceText,
-            imageInputs.map((image) => image.url),
+            moderationImageInputs.map((image) => image.url),
+            abortController.signal,
           );
           if (moderation.value.flagged) {
             throw new AiProviderError(
@@ -164,15 +189,21 @@ export class ReportGenerationProcessorService {
               'The supplied content cannot be processed',
             );
           }
-          await this.attempts.complete(moderationAttempt.id, {
-            providerRequestId: moderation.providerRequestId,
-          });
+          await this.attempts.completeOwned(
+            generationId,
+            moderationAttempt.id,
+            processingToken,
+            {
+              providerRequestId: moderation.providerRequestId,
+            },
+          );
         } catch (error: unknown) {
           const code =
             error instanceof AiProviderError ? error.code : 'AI_UNAVAILABLE';
           await this.attempts.fail(
             moderationAttempt.id,
             code,
+            processingToken,
             error instanceof AiProviderError
               ? error.providerRequestId
               : undefined,
@@ -185,6 +216,7 @@ export class ReportGenerationProcessorService {
         generationId,
         ReportGenerationStage.GENERATING_CONTENT,
         GENERATION_PROGRESS.GENERATING_CONTENT,
+        processingToken,
       );
       let structuredResult = generation.structuredResult
         ? reportResultSchema.parse(generation.structuredResult)
@@ -200,6 +232,7 @@ export class ReportGenerationProcessorService {
             stream,
             asset.originalFileName,
             asset.verifiedMimeType,
+            abortController.signal,
           );
           temporaryFileIds.push(fileId);
           documents.push({ assetId: asset.id, fileId });
@@ -209,35 +242,43 @@ export class ReportGenerationProcessorService {
           GenerationProviderOperation.REPORT_GENERATION,
           'openai',
           this.reportModel,
+          processingToken,
+          new Date(deadline),
         );
         try {
           this.assertBeforeDeadline(deadline);
-          const result = await this.provider.generateReport({
-            instructions: REPORT_INSTRUCTIONS,
-            sourceText,
-            images: imageInputs,
-            documents,
-            safetyIdentifier: generation.userId,
-            maxOutputTokens: this.numberSetting('AI_MAX_OUTPUT_TOKENS', 6_000),
-          });
+          const reportImageInputs = await Promise.all(
+            imageAssets.map(async (asset) => ({
+              assetId: asset.id,
+              url: (await this.storage.createPresignedGet(asset.storageKey))
+                .url,
+            })),
+          );
+          const result = await this.provider.generateReport(
+            {
+              instructions: REPORT_INSTRUCTIONS,
+              sourceText,
+              images: reportImageInputs,
+              documents,
+              safetyIdentifier: generation.userId,
+              maxOutputTokens: this.numberSetting(
+                'AI_MAX_OUTPUT_TOKENS',
+                6_000,
+              ),
+            },
+            abortController.signal,
+          );
           structuredResult = reportResultSchema.parse(result.value);
           this.validateImageReferences(structuredResult, imageAssets);
-          await this.attempts.complete(reportAttempt.id, {
-            providerRequestId: result.providerRequestId,
-            inputTokens: result.usage?.inputTokens,
-            outputTokens: result.usage?.outputTokens,
-          });
-          await this.prisma.reportGeneration.update({
-            where: { id: generationId },
-            data: {
-              structuredResult,
-              provider: 'openai',
-              model: this.reportModel,
-              providerRequestId: result.providerRequestId,
-              inputTokens: result.usage?.inputTokens,
-              outputTokens: result.usage?.outputTokens,
-            },
-          });
+          await this.persistReportResult(
+            generationId,
+            processingToken,
+            reportAttempt.id,
+            structuredResult,
+            result.providerRequestId,
+            result.usage?.inputTokens,
+            result.usage?.outputTokens,
+          );
         } catch (error: unknown) {
           const code =
             error instanceof AiProviderError
@@ -246,6 +287,7 @@ export class ReportGenerationProcessorService {
           await this.attempts.fail(
             reportAttempt.id,
             code,
+            processingToken,
             error instanceof AiProviderError
               ? error.providerRequestId
               : undefined,
@@ -265,6 +307,7 @@ export class ReportGenerationProcessorService {
         generationId,
         ReportGenerationStage.GENERATING_PDF,
         GENERATION_PROGRESS.GENERATING_PDF,
+        processingToken,
       );
       this.assertBeforeDeadline(deadline);
       const pdfImages = await this.loadReferencedImages(
@@ -278,14 +321,16 @@ export class ReportGenerationProcessorService {
         generatedAt,
         snapshot.report.language,
       );
+      await this.assertOwnership(generationId, processingToken);
 
       await this.updateProgress(
         generationId,
         ReportGenerationStage.UPLOADING_OUTPUT,
         GENERATION_PROGRESS.UPLOADING_OUTPUT,
+        processingToken,
       );
       this.assertBeforeDeadline(deadline);
-      uploadedOutputKey = `users/${generation.userId}/reports/${generation.reportId}/outputs/${generationId}.pdf`;
+      uploadedOutputKey = `users/${generation.userId}/reports/${generation.reportId}/outputs/${generationId}/${processingToken}.pdf`;
       await this.storage.uploadObject(
         uploadedOutputKey,
         pdfBytes,
@@ -295,6 +340,7 @@ export class ReportGenerationProcessorService {
         generationId,
         generation.reportId,
         generation.userId,
+        processingToken,
         uploadedOutputKey,
         pdfBytes.byteLength,
       );
@@ -320,15 +366,36 @@ export class ReportGenerationProcessorService {
       });
     } catch (error: unknown) {
       const providerError = this.normalizeError(error);
-      if (providerError.retryable && queueAttempt < maximumQueueAttempts) {
-        await this.prepareRetry(generationId, providerError.code);
-        throw providerError;
+      if (providerError.code === 'GENERATION_CLAIM_LOST') {
+        if (uploadedOutputKey) {
+          await this.scheduleOrphanCleanup(uploadedOutputKey);
+        }
+        this.logger.warn({
+          event: 'report_generation_claim_lost',
+          generationId,
+          attempt: queueAttempt,
+          errorCode: providerError.code,
+        });
+        return;
       }
       if (uploadedOutputKey) {
         await this.scheduleOrphanCleanup(uploadedOutputKey);
+        uploadedOutputKey = undefined;
+      }
+      if (providerError.retryable && queueAttempt < maximumQueueAttempts) {
+        const prepared = await this.prepareRetry(
+          generationId,
+          processingToken,
+          providerError.code,
+        );
+        if (prepared) {
+          throw providerError;
+        }
+        return;
       }
       await this.failGeneration(
         generationId,
+        processingToken,
         providerError.code,
         providerError.message,
       );
@@ -340,6 +407,9 @@ export class ReportGenerationProcessorService {
         durationMs: Date.now() - startedAt,
       });
     } finally {
+      clearTimeout(deadlineTimer);
+      clearInterval(heartbeat);
+      abortController.abort();
       await Promise.all(
         temporaryFileIds.map((fileId) =>
           this.provider.deleteTemporaryFile(fileId),
@@ -351,7 +421,6 @@ export class ReportGenerationProcessorService {
   private async claim(
     generationId: string,
     processingToken: string,
-    queueAttempt: number,
   ): Promise<boolean> {
     const now = new Date();
     const claim = await this.prisma.reportGeneration.updateMany({
@@ -359,10 +428,6 @@ export class ReportGenerationProcessorService {
         id: generationId,
         OR: [
           { status: ReportGenerationStatus.QUEUED },
-          {
-            status: ReportGenerationStatus.PROCESSING,
-            attemptCount: { lt: queueAttempt },
-          },
           {
             status: ReportGenerationStatus.PROCESSING,
             processingLeaseExpiresAt: { lt: now },
@@ -384,10 +449,24 @@ export class ReportGenerationProcessorService {
     generationId: string,
     reportId: string,
     userId: string,
+    processingToken: string,
     storageKey: string,
     size: number,
   ): Promise<string | undefined> {
     return this.prisma.$transaction(async (transaction) => {
+      const owned = await transaction.reportGeneration.findFirst({
+        where: {
+          id: generationId,
+          userId,
+          status: ReportGenerationStatus.PROCESSING,
+          processingToken,
+          processingLeaseExpiresAt: { gt: new Date() },
+        },
+        select: { id: true },
+      });
+      if (!owned) {
+        throw this.claimLost();
+      }
       const previous = await transaction.reportOutput.findUnique({
         where: { reportId },
         select: { storageKey: true },
@@ -419,8 +498,13 @@ export class ReportGenerationProcessorService {
           size,
         },
       });
-      await transaction.reportGeneration.update({
-        where: { id: generationId, userId },
+      const completed = await transaction.reportGeneration.updateMany({
+        where: {
+          id: generationId,
+          userId,
+          status: ReportGenerationStatus.PROCESSING,
+          processingToken,
+        },
         data: {
           status: ReportGenerationStatus.COMPLETED,
           stage: ReportGenerationStage.COMPLETED,
@@ -430,6 +514,9 @@ export class ReportGenerationProcessorService {
           processingLeaseExpiresAt: null,
         },
       });
+      if (completed.count !== 1) {
+        throw this.claimLost();
+      }
       await transaction.report.update({
         where: { id: reportId, userId },
         data: { status: ReportStatus.READY },
@@ -443,10 +530,16 @@ export class ReportGenerationProcessorService {
 
   private async prepareRetry(
     generationId: string,
+    processingToken: string,
     errorCode: string,
-  ): Promise<void> {
-    await this.prisma.reportGeneration.update({
-      where: { id: generationId },
+  ): Promise<boolean> {
+    const updated = await this.prisma.reportGeneration.updateMany({
+      where: {
+        id: generationId,
+        status: ReportGenerationStatus.PROCESSING,
+        processingToken,
+        processingLeaseExpiresAt: { gt: new Date() },
+      },
       data: {
         status: ReportGenerationStatus.QUEUED,
         errorCode,
@@ -455,16 +548,23 @@ export class ReportGenerationProcessorService {
         processingLeaseExpiresAt: null,
       },
     });
+    return updated.count === 1;
   }
 
   private async failGeneration(
     generationId: string,
+    processingToken: string,
     errorCode: string,
     message: string,
   ): Promise<void> {
     const generation = await this.prisma.$transaction(async (transaction) => {
-      const failed = await transaction.reportGeneration.update({
-        where: { id: generationId },
+      const failed = await transaction.reportGeneration.updateMany({
+        where: {
+          id: generationId,
+          status: ReportGenerationStatus.PROCESSING,
+          processingToken,
+          processingLeaseExpiresAt: { gt: new Date() },
+        },
         data: {
           status: ReportGenerationStatus.FAILED,
           errorCode,
@@ -473,10 +573,16 @@ export class ReportGenerationProcessorService {
           processingToken: null,
           processingLeaseExpiresAt: null,
         },
+      });
+      if (failed.count !== 1) {
+        return undefined;
+      }
+      const owned = await transaction.reportGeneration.findUniqueOrThrow({
+        where: { id: generationId },
         select: { reportId: true },
       });
       await transaction.report.update({
-        where: { id: failed.reportId },
+        where: { id: owned.reportId },
         data: { status: ReportStatus.FAILED },
       });
       await this.credits.releaseInTransaction(
@@ -484,8 +590,11 @@ export class ReportGenerationProcessorService {
         generationId,
         `Terminal failure: ${errorCode}`,
       );
-      return failed;
+      return owned;
     });
+    if (!generation) {
+      return;
+    }
     this.logger.warn({
       event: 'generation_credit_released',
       generationId,
@@ -514,11 +623,119 @@ export class ReportGenerationProcessorService {
     generationId: string,
     stage: ReportGenerationStage,
     progress: number,
+    processingToken: string,
   ): Promise<void> {
-    await this.prisma.reportGeneration.update({
-      where: { id: generationId },
-      data: { stage, progress },
+    const updated = await this.prisma.reportGeneration.updateMany({
+      where: {
+        id: generationId,
+        status: ReportGenerationStatus.PROCESSING,
+        processingToken,
+        processingLeaseExpiresAt: { gt: new Date() },
+      },
+      data: {
+        stage,
+        progress,
+        processingLeaseExpiresAt: this.leaseExpiration(),
+      },
     });
+    if (updated.count !== 1) {
+      throw this.claimLost();
+    }
+  }
+
+  private async persistReportResult(
+    generationId: string,
+    processingToken: string,
+    attemptId: string,
+    structuredResult: ReportResult,
+    providerRequestId?: string,
+    inputTokens?: number,
+    outputTokens?: number,
+  ): Promise<void> {
+    await this.prisma.$transaction(async (transaction) => {
+      const owned = await transaction.reportGeneration.findFirst({
+        where: {
+          id: generationId,
+          status: ReportGenerationStatus.PROCESSING,
+          processingToken,
+          processingLeaseExpiresAt: { gt: new Date() },
+        },
+        select: { id: true },
+      });
+      if (!owned) {
+        throw this.claimLost();
+      }
+      await this.attempts.completeInTransaction(
+        transaction,
+        attemptId,
+        processingToken,
+        {
+          providerRequestId,
+          inputTokens,
+          outputTokens,
+        },
+      );
+      const updated = await transaction.reportGeneration.updateMany({
+        where: {
+          id: generationId,
+          status: ReportGenerationStatus.PROCESSING,
+          processingToken,
+        },
+        data: {
+          structuredResult,
+          provider: 'openai',
+          model: this.reportModel,
+          providerRequestId,
+          inputTokens,
+          outputTokens,
+          processingLeaseExpiresAt: this.leaseExpiration(),
+        },
+      });
+      if (updated.count !== 1) {
+        throw this.claimLost();
+      }
+    });
+  }
+
+  private async assertOwnership(
+    generationId: string,
+    processingToken: string,
+  ): Promise<void> {
+    if (!(await this.renewLease(generationId, processingToken))) {
+      throw this.claimLost();
+    }
+  }
+
+  private async renewLease(
+    generationId: string,
+    processingToken: string,
+  ): Promise<boolean> {
+    const renewed = await this.prisma.reportGeneration.updateMany({
+      where: {
+        id: generationId,
+        status: ReportGenerationStatus.PROCESSING,
+        processingToken,
+        processingLeaseExpiresAt: { gt: new Date() },
+      },
+      data: { processingLeaseExpiresAt: this.leaseExpiration() },
+    });
+    return renewed.count === 1;
+  }
+
+  private leaseExpiration(): Date {
+    return new Date(Date.now() + this.jobTimeoutMs);
+  }
+
+  private heartbeatIntervalMs(): number {
+    return Math.max(1_000, Math.min(30_000, Math.floor(this.jobTimeoutMs / 3)));
+  }
+
+  private claimLost(): AiProviderError {
+    return new AiProviderError(
+      'GENERATION_CLAIM_LOST',
+      false,
+      'Generation processing ownership was lost',
+    );
   }
 
   private buildSourceText(

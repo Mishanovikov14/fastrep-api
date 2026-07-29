@@ -47,6 +47,8 @@ describe('AssetTranscriptionsService', () => {
           originalFileName: 'audio.mp3',
         },
         'en',
+        'processing-token',
+        new Date('2026-07-29T12:15:00.000Z'),
       ),
     ).resolves.toBe('Cached transcript');
     expect(storage.getObjectStream).not.toHaveBeenCalled();

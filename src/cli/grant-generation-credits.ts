@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import {
@@ -7,6 +7,7 @@ import {
 } from '../../generated/prisma/client';
 import { normalizeEmail } from '../common/utils/normalize-email';
 import { PrismaService } from '../prisma/prisma.service';
+import { assertCreditGrantEnabled } from './credit-grant-policy';
 import { CreditGrantModule } from './credit-grant.module';
 
 const logger = new Logger('GrantGenerationCredits');
@@ -16,15 +17,6 @@ const readArgument = (name: string): string | undefined => {
   return process.argv
     .find((argument) => argument.startsWith(prefix))
     ?.slice(prefix.length);
-};
-
-const secretMatches = (provided: string, expected: string): boolean => {
-  const providedBytes = Buffer.from(provided);
-  const expectedBytes = Buffer.from(expected);
-  return (
-    providedBytes.byteLength === expectedBytes.byteLength &&
-    timingSafeEqual(providedBytes, expectedBytes)
-  );
 };
 
 async function bootstrap(): Promise<void> {
@@ -39,19 +31,13 @@ async function bootstrap(): Promise<void> {
     amount > 1_000
   ) {
     throw new Error(
-      'Usage: npm run credits:grant -- --email=user@example.com --credits=5 --idempotency-key=ticket-123 [--secret=...]',
+      'Usage: npm run credits:grant -- --email=user@example.com --credits=5 --idempotency-key=ticket-123',
     );
   }
-  const production = process.env.NODE_ENV === 'production';
-  if (production) {
-    const expected = process.env.ADMIN_GRANT_SECRET ?? '';
-    const provided = readArgument('secret') ?? '';
-    if (!expected || !provided || !secretMatches(provided, expected)) {
-      throw new Error('A valid ADMIN_GRANT_SECRET is required in production');
-    }
-  } else if (process.env.ENABLE_DEV_CREDIT_GRANTS !== 'true') {
-    throw new Error('ENABLE_DEV_CREDIT_GRANTS=true is required');
-  }
+  assertCreditGrantEnabled(
+    process.env.NODE_ENV,
+    process.env.ENABLE_DEV_CREDIT_GRANTS,
+  );
 
   const context = await NestFactory.createApplicationContext(
     CreditGrantModule,

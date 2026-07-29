@@ -39,6 +39,8 @@ CREATE TABLE "ReportGeneration" (
     "cancelledAt" TIMESTAMP(3),
     "processingToken" TEXT,
     "processingLeaseExpiresAt" TIMESTAMP(3),
+    "enqueuedAt" TIMESTAMP(3),
+    "priorReportStatus" "ReportStatus" NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -140,6 +142,8 @@ CREATE TABLE "GenerationProviderAttempt" (
     "outputTokens" INTEGER,
     "audioDurationSeconds" DOUBLE PRECISION,
     "errorCode" TEXT,
+    "processingToken" TEXT NOT NULL,
+    "leaseExpiresAt" TIMESTAMP(3) NOT NULL,
     "startedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "completedAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -165,6 +169,8 @@ CREATE UNIQUE INDEX "GenerationCreditGrant_userId_subscriptionPeriodKey_key" ON 
 CREATE UNIQUE INDEX "GenerationCreditGrant_source_externalPurchaseId_key" ON "GenerationCreditGrant"("source", "externalPurchaseId");
 CREATE INDEX "GenerationCreditGrant_userId_validFrom_expiresAt_idx" ON "GenerationCreditGrant"("userId", "validFrom", "expiresAt");
 CREATE UNIQUE INDEX "GenerationCreditTransaction_idempotencyKey_key" ON "GenerationCreditTransaction"("idempotencyKey");
+CREATE UNIQUE INDEX "GenerationCreditTransaction_one_reserve_per_generation_key" ON "GenerationCreditTransaction"("generationId") WHERE "type" = 'RESERVE';
+CREATE UNIQUE INDEX "GenerationCreditTransaction_one_terminal_per_generation_key" ON "GenerationCreditTransaction"("generationId") WHERE "type" IN ('CONSUME', 'RELEASE', 'REFUND');
 CREATE INDEX "GenerationCreditTransaction_userId_createdAt_idx" ON "GenerationCreditTransaction"("userId", "createdAt");
 CREATE INDEX "GenerationCreditTransaction_generationId_idx" ON "GenerationCreditTransaction"("generationId");
 CREATE INDEX "GenerationCreditTransaction_grantId_idx" ON "GenerationCreditTransaction"("grantId");

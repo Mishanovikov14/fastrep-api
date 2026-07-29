@@ -35,6 +35,7 @@ export class OpenAiReportProviderService implements AiProvider {
   async moderate(
     text: string,
     imageUrls: string[],
+    signal?: AbortSignal,
   ): Promise<ProviderResult<{ flagged: boolean }>> {
     try {
       const input: OpenAI.Moderations.ModerationMultiModalInput[] = [];
@@ -51,7 +52,7 @@ export class OpenAiReportProviderService implements AiProvider {
         return { value: { flagged: false } };
       }
       const { data, request_id } = await this.openAi.client.moderations
-        .create({ model: 'omni-moderation-latest', input })
+        .create({ model: 'omni-moderation-latest', input }, { signal })
         .withResponse();
       return {
         value: { flagged: data.results.some((result) => result.flagged) },
@@ -67,6 +68,7 @@ export class OpenAiReportProviderService implements AiProvider {
     fileName: string,
     mimeType: string,
     language?: string,
+    signal?: AbortSignal,
   ): Promise<ProviderResult<ProviderTranscription>> {
     try {
       const file = toStreamingFile(
@@ -75,12 +77,15 @@ export class OpenAiReportProviderService implements AiProvider {
         { type: mimeType },
       );
       const { data, request_id } = await this.openAi.client.audio.transcriptions
-        .create({
-          file,
-          model: this.transcriptionModel,
-          response_format: 'json',
-          language,
-        })
+        .create(
+          {
+            file,
+            model: this.transcriptionModel,
+            response_format: 'json',
+            language,
+          },
+          { signal },
+        )
         .withResponse();
       return {
         value: {
@@ -102,6 +107,7 @@ export class OpenAiReportProviderService implements AiProvider {
     stream: NodeJS.ReadableStream,
     fileName: string,
     mimeType: string,
+    signal?: AbortSignal,
   ): Promise<string> {
     try {
       const file = toStreamingFile(
@@ -109,14 +115,17 @@ export class OpenAiReportProviderService implements AiProvider {
         fileName,
         { type: mimeType },
       );
-      const result = await this.openAi.client.files.create({
-        file,
-        purpose: 'user_data',
-        expires_after: {
-          anchor: 'created_at',
-          seconds: this.fileTtlSeconds,
+      const result = await this.openAi.client.files.create(
+        {
+          file,
+          purpose: 'user_data',
+          expires_after: {
+            anchor: 'created_at',
+            seconds: this.fileTtlSeconds,
+          },
         },
-      });
+        { signal },
+      );
       return result.id;
     } catch (error: unknown) {
       throw this.providerError(error, 'AI_UNAVAILABLE');
@@ -133,6 +142,7 @@ export class OpenAiReportProviderService implements AiProvider {
 
   async generateReport(
     request: ProviderReportRequest,
+    signal?: AbortSignal,
   ): Promise<ProviderResult<ReportResult>> {
     try {
       const content: OpenAI.Responses.ResponseInputContent[] = [
@@ -149,17 +159,20 @@ export class OpenAiReportProviderService implements AiProvider {
         })),
       ];
       const { data, request_id } = await this.openAi.client.responses
-        .parse({
-          model: this.reportModel,
-          instructions: request.instructions,
-          input: [{ role: 'user', content }],
-          max_output_tokens: request.maxOutputTokens,
-          safety_identifier: request.safetyIdentifier,
-          store: false,
-          text: {
-            format: zodTextFormat(reportResultSchema, 'fastrep_report_v1'),
+        .parse(
+          {
+            model: this.reportModel,
+            instructions: request.instructions,
+            input: [{ role: 'user', content }],
+            max_output_tokens: request.maxOutputTokens,
+            safety_identifier: request.safetyIdentifier,
+            store: false,
+            text: {
+              format: zodTextFormat(reportResultSchema, 'fastrep_report_v1'),
+            },
           },
-        })
+          { signal },
+        )
         .withResponse();
       if (data.status !== 'completed' || !data.output_parsed) {
         throw new AiProviderError(
@@ -199,6 +212,13 @@ export class OpenAiReportProviderService implements AiProvider {
   }
 
   private providerError(error: unknown, fallbackCode: string): AiProviderError {
+    if (error instanceof OpenAI.APIUserAbortError) {
+      return new AiProviderError(
+        'AI_REQUEST_ABORTED',
+        true,
+        'AI provider request was cancelled',
+      );
+    }
     if (error instanceof OpenAI.APIConnectionTimeoutError) {
       return new AiProviderError(
         'AI_TIMEOUT',

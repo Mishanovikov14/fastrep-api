@@ -107,8 +107,8 @@ The API listens on `http://localhost:3000` by default. The Docker Compose servic
 | `OPENAI_TRANSCRIPTION_MODEL` | Production when AI enabled | Audio model; default `gpt-4o-mini-transcribe`. |
 | `OPENAI_REQUEST_TIMEOUT_MS` / `OPENAI_MAX_RETRIES` | No | SDK timeout and retries; defaults `180000` and `0`, and retries must remain `0`. Application and queue budgets own retries. |
 | `OPENAI_FILE_TTL_SECONDS` | No | Temporary provider-file expiry, 3600-2592000; default `3600`. Files are also deleted best effort. |
-| `REDIS_URL` | Production | Redis connection shared by API producer and worker. |
-| `REPORT_GENERATION_QUEUE_NAME` | Production | BullMQ queue; default `report-generation`. |
+| `REDIS_URL` | Production worker, and API when AI enabled | Redis connection shared by API producer and worker. |
+| `REPORT_GENERATION_QUEUE_NAME` | Production worker, and API when AI enabled | Explicit shared BullMQ queue name; development default `report-generation`. |
 | `REPORT_GENERATION_JOB_ATTEMPTS` / `REPORT_GENERATION_BACKOFF_MS` | No | Durable job attempts and exponential backoff; defaults `2` and `30000`. |
 | `REPORT_GENERATION_JOB_TIMEOUT_MS` / `REPORT_GENERATION_CONCURRENCY` | No | Processing lease/worker lock and worker concurrency; defaults `900000` and `1`. |
 | `AI_MAX_PROVIDER_CALLS_PER_GENERATION` | No | Report-model/moderation call budget per operation; default `2`. |
@@ -117,10 +117,11 @@ The API listens on `http://localhost:3000` by default. The Docker Compose servic
 | `GENERATION_MAX_ACTIVE_PER_USER` | No | Active-generation ceiling; MVP requires `1`. |
 | `GENERATION_START_RATE_LIMIT` / `GENERATION_START_RATE_WINDOW_SECONDS` | No | Per-user start limit; defaults `5` per `3600` seconds. |
 | `GENERATION_DAILY_SAFETY_LIMIT` / `AI_GLOBAL_DAILY_GENERATION_LIMIT` | No | Per-user/global rolling-day caps; defaults `20` and `500`. |
-| `AI_GENERATION_ENABLED` | No | Global generation kill switch; default `true`. |
+| `AI_GENERATION_ENABLED` | Production | Strict global generation kill switch. It must be explicit in production; development defaults to `true`. |
 | `REPORT_OUTPUT_MAX_BYTES` / `DOWNLOAD_URL_TTL_SECONDS` | No | PDF size and signed-download lifetime; defaults `52428800` and `600`. |
+| `REPORT_PDF_MAX_PAGES` / `REPORT_PDF_MAX_IMAGE_BYTES` | No | PDF page and aggregate image-byte safeguards; defaults `100` and `52428800`. |
 | `ENABLE_DEV_CREDIT_GRANTS` | No | Must be `true` to run the development credit CLI outside production. |
-| `ADMIN_GRANT_SECRET` | Protected production CLI only | Required CLI secret if an administrative grant is intentionally run in production. |
+| `FASTREP_PROCESS_ROLE` | No | `api` or `worker`; the worker entry point sets `worker` for role-specific validation. |
 | `NODE_ENV`           | Yes      | Runtime environment. Use `production` for hosted deployments.                              |
 | `PORT`               | Production | HTTP port. Defaults to `3000` outside production.                                        |
 | `SWAGGER_ENABLED`    | Production | Exposes Swagger only when set to `true`.                                                 |
@@ -182,6 +183,11 @@ variables. The API starts with `npm run start:prod`; the worker starts with
 release. Redis must be persistent; the S3 bucket must stay private and must not
 grant a public-read ACL.
 
+Production requires an explicit `AI_GENERATION_ENABLED` value. When it is
+`false`, the API does not require Redis or OpenAI credentials. The worker
+always fails fast without database, Redis, an explicit queue name, OpenAI, and
+S3 configuration. JWT, Resend, `PORT`, and Swagger settings are API-only.
+
 For local/bootstrap testing, grant tracked credits only to a verified user:
 
 ```bash
@@ -190,7 +196,8 @@ ENABLE_DEV_CREDIT_GRANTS=true npm run credits:grant -- \
 ```
 
 The command creates a grant and ledger transaction. Repeating the same key is a
-no-op. There is no public credit-grant endpoint.
+no-op. There is no public credit-grant endpoint, and the command cannot run
+when `NODE_ENV=production`, even if the development opt-in is set.
 
 ## Development and verification
 
@@ -270,13 +277,21 @@ lazily on later upload requests.
 
 See [Auth API](docs/api.md) for request and response examples.
 
-Generation costs exactly one reserved credit. It is consumed only when the PDF
-and database success state commit atomically. Queue failure, queued
+Generation costs exactly one reserved credit. It is consumed only when the
+HEAD-verified PDF and database success state commit atomically. Queue failure, queued
 cancellation, or terminal platform/provider failure releases it. Internal
 technical retries reuse the same generation and reservation. Grants are chosen
 by nearest expiry, then subscription credits before non-expiring purchased
 credits. `User.isPremium` is retained only for compatibility and does not grant
 generation access.
+
+The OpenAI SDK performs zero automatic retries. Every paid provider call first
+creates a durable, token-owned attempt with a lease. A live attempt blocks
+duplicate delivery; an expired attempt is closed as stale and remains counted
+before recovery uses the next finite slot. BullMQ redelivery resumes completed
+transcription and structured report state. No retry layer can exceed
+`AI_MAX_PROVIDER_CALLS_PER_GENERATION` per report operation or
+`TRANSCRIPTION_MAX_ATTEMPTS_PER_ASSET` per audio asset.
 
 Supported user language codes are `en`, `fr`, `es`, `uk`, and `de`. The
 default is `en`.

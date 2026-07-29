@@ -9,6 +9,7 @@ import {
 } from '../../generated/prisma/client';
 import {
   conflict,
+  forbidden,
   notFound,
   tooManyRequests,
   unavailable,
@@ -22,6 +23,13 @@ import {
 import { publicGenerationSelect } from './generation.select';
 import { ReportGenerationQueueService } from './report-generation-queue.service';
 import { GenerationInputSnapshot, PublicGeneration } from './generation.types';
+
+const queuedGenerationSelect = {
+  ...publicGenerationSelect,
+  enqueuedAt: true,
+} satisfies Prisma.ReportGenerationSelect;
+
+type QueuedGeneration = PublicGeneration & { enqueuedAt: Date | null };
 
 @Injectable()
 export class ReportGenerationsService {
@@ -115,6 +123,21 @@ export class ReportGenerationsService {
     }
 
     const cancelled = await this.prisma.$transaction(async (transaction) => {
+      const current = await transaction.reportGeneration.findFirst({
+        where: {
+          id: generationId,
+          reportId,
+          userId,
+          status: ReportGenerationStatus.QUEUED,
+        },
+        select: { priorReportStatus: true },
+      });
+      if (!current) {
+        throw conflict(
+          'GENERATION_NOT_CANCELLABLE',
+          'Generation processing has already started',
+        );
+      }
       const result = await transaction.reportGeneration.updateMany({
         where: {
           id: generationId,
@@ -135,7 +158,7 @@ export class ReportGenerationsService {
       }
       await transaction.report.update({
         where: { id: reportId },
-        data: { status: ReportStatus.DRAFT },
+        data: { status: current.priorReportStatus },
       });
       await this.credits.releaseInTransaction(
         transaction,
@@ -159,7 +182,12 @@ export class ReportGenerationsService {
     if (this.config.get<string>('AI_GENERATION_ENABLED') === 'false') {
       throw unavailable('GENERATION_DISABLED', 'Report generation is disabled');
     }
-    if (!idempotencyKey || idempotencyKey.length > 200) {
+    if (
+      idempotencyKey.length < 1 ||
+      idempotencyKey.length > 128 ||
+      idempotencyKey !== idempotencyKey.trim() ||
+      !/^[\x21-\x7E]+$/.test(idempotencyKey)
+    ) {
       throw conflict(
         'INVALID_IDEMPOTENCY_KEY',
         'A valid Idempotency-Key header is required',
@@ -174,14 +202,14 @@ export class ReportGenerationsService {
           idempotencyKey,
         },
       },
-      select: publicGenerationSelect,
+      select: queuedGenerationSelect,
     });
     if (existing) {
-      return existing;
+      return this.ensureEnqueued(existing);
     }
 
     const generationId = randomUUID();
-    let generation: PublicGeneration | undefined;
+    let generation: QueuedGeneration | undefined;
     for (let attempt = 1; attempt <= SERIALIZABLE_RETRY_LIMIT; attempt += 1) {
       try {
         generation = await this.prisma.$transaction(
@@ -194,7 +222,7 @@ export class ReportGenerationsService {
                   idempotencyKey,
                 },
               },
-              select: publicGenerationSelect,
+              select: queuedGenerationSelect,
             });
             if (duplicate) {
               return duplicate;
@@ -207,7 +235,9 @@ export class ReportGenerationsService {
                 title: true,
                 notes: true,
                 status: true,
-                user: { select: { language: true } },
+                user: {
+                  select: { language: true, emailVerifiedAt: true },
+                },
                 assets: {
                   orderBy: { position: 'asc' },
                   select: {
@@ -225,6 +255,12 @@ export class ReportGenerationsService {
             });
             if (!report) {
               throw new NotFoundException('Report not found');
+            }
+            if (!report.user.emailVerifiedAt) {
+              throw forbidden(
+                'EMAIL_VERIFICATION_REQUIRED',
+                'Verify the account email before generating reports',
+              );
             }
             const isAllowed = allowFailedReport
               ? report.status === ReportStatus.FAILED
@@ -267,6 +303,7 @@ export class ReportGenerationsService {
                 idempotencyKey,
                 promptVersion: REPORT_PROMPT_VERSION,
                 inputSnapshot: snapshot,
+                priorReportStatus: report.status,
               },
             });
             await this.credits.reserve(transaction, userId, generationId);
@@ -276,7 +313,7 @@ export class ReportGenerationsService {
             });
             return transaction.reportGeneration.findUniqueOrThrow({
               where: { id: generationId },
-              select: publicGenerationSelect,
+              select: queuedGenerationSelect,
             });
           },
           { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
@@ -301,7 +338,7 @@ export class ReportGenerationsService {
                 idempotencyKey,
               },
             },
-            select: publicGenerationSelect,
+            select: queuedGenerationSelect,
           });
           if (duplicate) {
             generation = duplicate;
@@ -322,22 +359,7 @@ export class ReportGenerationsService {
       );
     }
 
-    try {
-      await this.queue.enqueue(generation.id);
-    } catch {
-      await this.compensateQueueFailure(generation.id, reportId);
-      this.logger.error({
-        event: 'generation_enqueue_failed',
-        generationId: generation.id,
-        reportId,
-        errorCode: 'GENERATION_QUEUE_UNAVAILABLE',
-      });
-      throw unavailable(
-        'GENERATION_QUEUE_UNAVAILABLE',
-        'Report generation is temporarily unavailable',
-      );
-    }
-    return generation;
+    return this.ensureEnqueued(generation);
   }
 
   private validateSources(
@@ -412,30 +434,92 @@ export class ReportGenerationsService {
     }
   }
 
-  private async compensateQueueFailure(
-    generationId: string,
-    reportId: string,
-  ): Promise<void> {
+  private async ensureEnqueued(
+    generation: QueuedGeneration,
+  ): Promise<PublicGeneration> {
+    if (
+      generation.status !== ReportGenerationStatus.QUEUED ||
+      generation.enqueuedAt
+    ) {
+      return this.toPublicGeneration(generation);
+    }
+    try {
+      await this.queue.enqueue(generation.id);
+    } catch {
+      try {
+        await this.compensateQueueFailure(generation.id);
+      } catch {
+        this.logger.error({
+          event: 'generation_enqueue_compensation_failed',
+          generationId: generation.id,
+          errorCode: 'GENERATION_QUEUE_COMPENSATION_FAILED',
+        });
+      }
+      this.logger.error({
+        event: 'generation_enqueue_failed',
+        generationId: generation.id,
+        errorCode: 'GENERATION_QUEUE_UNAVAILABLE',
+      });
+      throw unavailable(
+        'GENERATION_QUEUE_UNAVAILABLE',
+        'Report generation is temporarily unavailable',
+      );
+    }
+    try {
+      await this.prisma.reportGeneration.updateMany({
+        where: {
+          id: generation.id,
+          status: ReportGenerationStatus.QUEUED,
+          enqueuedAt: null,
+        },
+        data: { enqueuedAt: new Date() },
+      });
+    } catch {
+      this.logger.warn({
+        event: 'generation_enqueue_marker_failed',
+        generationId: generation.id,
+        errorCode: 'GENERATION_ENQUEUE_MARKER_FAILED',
+      });
+    }
+    return this.toPublicGeneration(generation);
+  }
+
+  private async compensateQueueFailure(generationId: string): Promise<void> {
     await this.prisma.$transaction(async (transaction) => {
-      await transaction.reportGeneration.update({
+      const generation = await transaction.reportGeneration.findUnique({
         where: { id: generationId },
-        data: {
-          status: ReportGenerationStatus.FAILED,
-          errorCode: 'GENERATION_QUEUE_UNAVAILABLE',
-          errorMessage: 'Report generation is temporarily unavailable',
-          completedAt: new Date(),
+        select: {
+          id: true,
+          reportId: true,
+          status: true,
+          priorReportStatus: true,
         },
       });
-      await transaction.report.update({
-        where: { id: reportId },
-        data: { status: ReportStatus.DRAFT },
-      });
+      if (!generation || generation.status !== ReportGenerationStatus.QUEUED) {
+        return;
+      }
       await this.credits.releaseInTransaction(
         transaction,
-        generationId,
+        generation.id,
         'Queue enqueue failed',
       );
+      await transaction.report.updateMany({
+        where: {
+          id: generation.reportId,
+          status: ReportStatus.PROCESSING,
+        },
+        data: { status: generation.priorReportStatus },
+      });
+      await transaction.reportGeneration.delete({
+        where: { id: generation.id },
+      });
     });
+  }
+
+  private toPublicGeneration(generation: QueuedGeneration): PublicGeneration {
+    const { enqueuedAt, ...publicGeneration } = generation;
+    void enqueuedAt;
+    return publicGeneration;
   }
 
   private async assertOwnedReport(

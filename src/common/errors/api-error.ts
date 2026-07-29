@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   HttpException,
   HttpStatus,
   NotFoundException,
@@ -16,6 +17,9 @@ export const conflict = (code: string, message: string): ConflictException =>
 
 export const notFound = (code: string, message: string): NotFoundException =>
   new NotFoundException({ code, message } satisfies ApiErrorBody);
+
+export const forbidden = (code: string, message: string): ForbiddenException =>
+  new ForbiddenException({ code, message } satisfies ApiErrorBody);
 
 export const unavailable = (
   code: string,

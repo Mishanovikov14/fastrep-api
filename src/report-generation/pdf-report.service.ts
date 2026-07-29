@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -10,14 +11,36 @@ export type PdfImage = {
   bytes: Uint8Array;
 };
 
+export const fontPathCandidates = (
+  runtimeDirectory: string,
+  workingDirectory: string,
+  fileName: string,
+): string[] => [
+  join(workingDirectory, 'assets/fonts', fileName),
+  join(runtimeDirectory, '../../assets/fonts', fileName),
+  join(runtimeDirectory, '../../../assets/fonts', fileName),
+];
+
 @Injectable()
 export class PdfReportService {
   private readonly maximumBytes: number;
+  private readonly maximumPages: number;
+  private readonly maximumImageBytes: number;
+  private readonly regularFontPath?: string;
+  private readonly boldFontPath?: string;
 
   constructor(config: ConfigService) {
     this.maximumBytes = Number(
       config.get<string>('REPORT_OUTPUT_MAX_BYTES') ?? '52428800',
     );
+    this.maximumPages = Number(
+      config.get<string>('REPORT_PDF_MAX_PAGES') ?? '100',
+    );
+    this.maximumImageBytes = Number(
+      config.get<string>('REPORT_PDF_MAX_IMAGE_BYTES') ?? '52428800',
+    );
+    this.regularFontPath = this.resolveFont('NotoSans-Regular.ttf');
+    this.boldFontPath = this.resolveFont('NotoSans-Bold.ttf');
   }
 
   async generate(
@@ -26,6 +49,24 @@ export class PdfReportService {
     generatedAt: Date,
     language = 'en',
   ): Promise<Uint8Array> {
+    if (!this.regularFontPath || !this.boldFontPath) {
+      throw new AiProviderError(
+        'PDF_FONT_MISSING',
+        false,
+        'Required PDF fonts are unavailable',
+      );
+    }
+    const imageBytes = images.reduce(
+      (total, image) => total + image.bytes.byteLength,
+      0,
+    );
+    if (imageBytes > this.maximumImageBytes) {
+      throw new AiProviderError(
+        'PDF_IMAGE_INPUT_TOO_LARGE',
+        false,
+        'PDF image input exceeds the configured memory limit',
+      );
+    }
     const labels = this.labels(language);
     const imageMap = new Map(
       images.map((image) => [image.assetId, image.bytes]),
@@ -42,14 +83,8 @@ export class PdfReportService {
         ModDate: generatedAt,
       },
     });
-    document.registerFont(
-      'NotoSans',
-      join(process.cwd(), 'assets/fonts/NotoSans-Regular.ttf'),
-    );
-    document.registerFont(
-      'NotoSansBold',
-      join(process.cwd(), 'assets/fonts/NotoSans-Bold.ttf'),
-    );
+    document.registerFont('NotoSans', this.regularFontPath);
+    document.registerFont('NotoSansBold', this.boldFontPath);
 
     const chunks: Buffer[] = [];
     let totalBytes = 0;
@@ -179,6 +214,15 @@ export class PdfReportService {
     }
 
     const range = document.bufferedPageRange();
+    if (range.count > this.maximumPages) {
+      document.end();
+      await completed;
+      throw new AiProviderError(
+        'REPORT_OUTPUT_TOO_MANY_PAGES',
+        false,
+        'Generated PDF exceeds the configured page limit',
+      );
+    }
     for (let index = 0; index < range.count; index += 1) {
       document.switchToPage(range.start + index);
       document.page.margins.bottom = 0;
@@ -200,6 +244,11 @@ export class PdfReportService {
     if (document.y + points > document.page.height - 64) {
       document.addPage();
     }
+  }
+
+  private resolveFont(fileName: string): string | undefined {
+    const candidates = fontPathCandidates(__dirname, process.cwd(), fileName);
+    return candidates.find((candidate) => existsSync(candidate));
   }
 
   private labels(language: string): {

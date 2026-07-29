@@ -35,20 +35,9 @@ export class CreditsService {
         validFrom: { lte: now },
         OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
       },
-      orderBy: [
-        { expiresAt: { sort: 'asc', nulls: 'last' } },
-        { createdAt: 'asc' },
-      ],
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
-    candidates.sort((left, right) => {
-      if (left.expiresAt || right.expiresAt) {
-        return 0;
-      }
-      return (
-        this.nonExpiringPriority(left.source) -
-        this.nonExpiringPriority(right.source)
-      );
-    });
+    candidates.sort((left, right) => this.compareGrants(left, right));
 
     for (const grant of candidates) {
       const updated = await transaction.generationCreditGrant.updateMany({
@@ -168,9 +157,18 @@ export class CreditsService {
         'The generation credit reservation is missing',
       );
     }
-    await transaction.generationCreditTransaction.upsert({
-      where: { idempotencyKey: this.key(generationId, 'consume') },
-      create: {
+    const terminal = await this.findTerminal(transaction, generationId);
+    if (terminal?.type === GenerationCreditTransactionType.CONSUME) {
+      return;
+    }
+    if (terminal) {
+      throw conflict(
+        'GENERATION_CREDIT_ALREADY_RELEASED',
+        'The generation credit has already been restored',
+      );
+    }
+    await transaction.generationCreditTransaction.create({
+      data: {
         userId: reservation.userId,
         generationId,
         grantId: reservation.grantId,
@@ -179,7 +177,6 @@ export class CreditsService {
         idempotencyKey: this.key(generationId, 'consume'),
         reason: 'Successful report generation',
       },
-      update: {},
     });
   }
 
@@ -198,18 +195,11 @@ export class CreditsService {
     if (!reservation?.grantId) {
       return;
     }
-    const consumed = await transaction.generationCreditTransaction.findUnique({
-      where: { idempotencyKey: this.key(generationId, 'consume') },
-      select: { id: true },
-    });
-    if (consumed) {
+    const terminal = await this.findTerminal(transaction, generationId);
+    if (terminal?.type === GenerationCreditTransactionType.RELEASE) {
       return;
     }
-    const released = await transaction.generationCreditTransaction.findUnique({
-      where: { idempotencyKey: this.key(generationId, 'release') },
-      select: { id: true },
-    });
-    if (released) {
+    if (terminal) {
       return;
     }
 
@@ -244,7 +234,70 @@ export class CreditsService {
     return `generation:${generationId}:${action}`;
   }
 
-  private nonExpiringPriority(source: GenerationCreditSource): number {
-    return source === GenerationCreditSource.PURCHASED_PACK ? 1 : 0;
+  private findTerminal(
+    transaction: Prisma.TransactionClient,
+    generationId: string,
+  ) {
+    return transaction.generationCreditTransaction.findFirst({
+      where: {
+        generationId,
+        type: {
+          in: [
+            GenerationCreditTransactionType.CONSUME,
+            GenerationCreditTransactionType.RELEASE,
+            GenerationCreditTransactionType.REFUND,
+          ],
+        },
+      },
+      select: { type: true },
+    });
+  }
+
+  private compareGrants(
+    left: {
+      id: string;
+      source: GenerationCreditSource;
+      expiresAt: Date | null;
+      createdAt: Date;
+    },
+    right: {
+      id: string;
+      source: GenerationCreditSource;
+      expiresAt: Date | null;
+      createdAt: Date;
+    },
+  ): number {
+    const leftExpiration = left.expiresAt?.getTime() ?? Number.MAX_SAFE_INTEGER;
+    const rightExpiration =
+      right.expiresAt?.getTime() ?? Number.MAX_SAFE_INTEGER;
+    if (leftExpiration !== rightExpiration) {
+      return leftExpiration - rightExpiration;
+    }
+    const sourceDifference =
+      this.sourcePriority(left.source) - this.sourcePriority(right.source);
+    if (sourceDifference !== 0) {
+      return sourceDifference;
+    }
+    const createdDifference =
+      left.createdAt.getTime() - right.createdAt.getTime();
+    if (createdDifference !== 0) {
+      return createdDifference;
+    }
+    return left.id.localeCompare(right.id);
+  }
+
+  private sourcePriority(source: GenerationCreditSource): number {
+    switch (source) {
+      case GenerationCreditSource.SUBSCRIPTION_MONTHLY:
+        return 0;
+      case GenerationCreditSource.PROMOTIONAL:
+        return 1;
+      case GenerationCreditSource.ADMIN:
+        return 2;
+      case GenerationCreditSource.REFUND:
+        return 3;
+      case GenerationCreditSource.PURCHASED_PACK:
+        return 4;
+    }
   }
 }

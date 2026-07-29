@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import {
   AssetTranscriptionStatus,
   GenerationProviderOperation,
+  ReportGenerationStatus,
   ReportAssetType,
 } from '../../generated/prisma/client';
 import { AI_PROVIDER, AiProviderError } from '../ai/ai-provider.interface';
@@ -34,6 +35,9 @@ export class AssetTranscriptionsService {
     generationId: string,
     asset: GenerationSnapshotAsset,
     language: string,
+    processingToken: string,
+    leaseExpiresAt: Date,
+    signal?: AbortSignal,
   ): Promise<string> {
     if (
       asset.type !== ReportAssetType.AUDIO ||
@@ -74,6 +78,8 @@ export class AssetTranscriptionsService {
       GenerationProviderOperation.TRANSCRIPTION,
       'openai',
       this.model,
+      processingToken,
+      leaseExpiresAt,
       asset.id,
     );
 
@@ -84,21 +90,45 @@ export class AssetTranscriptionsService {
         asset.originalFileName,
         asset.verifiedMimeType,
         this.normalizeLanguage(language),
+        signal,
       );
-      await this.attempts.complete(attempt.id, {
-        providerRequestId: result.providerRequestId,
-        audioDurationSeconds: result.value.durationSeconds,
-      });
-      await this.prisma.reportAssetTranscription.update({
-        where: { assetId: asset.id },
-        data: {
-          status: AssetTranscriptionStatus.COMPLETED,
-          text: result.value.text,
-          language: result.value.language ?? language,
-          provider: 'openai',
-          model: this.model,
-          providerRequestId: result.providerRequestId,
-        },
+      await this.prisma.$transaction(async (transaction) => {
+        const owned = await transaction.reportGeneration.findFirst({
+          where: {
+            id: generationId,
+            status: ReportGenerationStatus.PROCESSING,
+            processingToken,
+            processingLeaseExpiresAt: { gt: new Date() },
+          },
+          select: { id: true },
+        });
+        if (!owned) {
+          throw new AiProviderError(
+            'GENERATION_CLAIM_LOST',
+            false,
+            'Generation processing ownership was lost',
+          );
+        }
+        await this.attempts.completeInTransaction(
+          transaction,
+          attempt.id,
+          processingToken,
+          {
+            providerRequestId: result.providerRequestId,
+            audioDurationSeconds: result.value.durationSeconds,
+          },
+        );
+        await transaction.reportAssetTranscription.update({
+          where: { assetId: asset.id },
+          data: {
+            status: AssetTranscriptionStatus.COMPLETED,
+            text: result.value.text,
+            language: result.value.language ?? language,
+            provider: 'openai',
+            model: this.model,
+            providerRequestId: result.providerRequestId,
+          },
+        });
       });
       return result.value.text;
     } catch (error: unknown) {
@@ -110,9 +140,28 @@ export class AssetTranscriptionsService {
               true,
               'Audio transcription failed',
             );
+      if (providerError.code === 'GENERATION_CLAIM_LOST') {
+        throw providerError;
+      }
+      const owned = await this.prisma.reportGeneration.findFirst({
+        where: {
+          id: generationId,
+          status: ReportGenerationStatus.PROCESSING,
+          processingToken,
+        },
+        select: { id: true },
+      });
+      if (!owned) {
+        throw new AiProviderError(
+          'GENERATION_CLAIM_LOST',
+          false,
+          'Generation processing ownership was lost',
+        );
+      }
       await this.attempts.fail(
         attempt.id,
         providerError.code,
+        processingToken,
         providerError.providerRequestId,
       );
       await this.prisma.reportAssetTranscription.update({

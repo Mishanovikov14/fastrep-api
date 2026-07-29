@@ -41,21 +41,25 @@ export interface AiProvider {
   moderate(
     text: string,
     imageUrls: string[],
+    signal?: AbortSignal,
   ): Promise<ProviderResult<{ flagged: boolean }>>;
   transcribe(
     stream: Readable,
     fileName: string,
     mimeType: string,
     language?: string,
+    signal?: AbortSignal,
   ): Promise<ProviderResult<ProviderTranscription>>;
   uploadDocument(
     stream: Readable,
     fileName: string,
     mimeType: string,
+    signal?: AbortSignal,
   ): Promise<string>;
   deleteTemporaryFile(fileId: string): Promise<void>;
   generateReport(
     request: ProviderReportRequest,
+    signal?: AbortSignal,
   ): Promise<ProviderResult<ReportResult>>;
 }
 

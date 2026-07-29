@@ -391,9 +391,10 @@ grant totals:
 
 ## POST /reports/:reportId/generations
 
-Requires an `Idempotency-Key` header (maximum 200 characters) and returns `202
-Accepted`. The same user, report, and key returns the original generation and
-does not reserve another credit.
+Requires a printable ASCII `Idempotency-Key` header (1-128 characters, without
+leading or trailing whitespace) and returns `202 Accepted`. The same user,
+report, and key returns the original generation and does not reserve another
+credit.
 
 ```json
 {
@@ -414,9 +415,9 @@ The report must be `DRAFT`, have non-empty notes or a `READY` asset, and have
 no pending or rejected asset. Creation snapshots title, notes, language, and
 ordered ready-asset metadata in the same serializable transaction that creates
 the generation, reserves a credit, and moves the report to `PROCESSING`. The
-queue job is created after commit. Enqueue failure marks the generation failed,
-returns the report to `DRAFT`, releases the credit, and returns
-`GENERATION_QUEUE_UNAVAILABLE`.
+queue job is created after commit. Enqueue failure restores the report's exact
+prior state, releases the credit, removes the unusable generation so the same
+key can be retried, and returns `GENERATION_QUEUE_UNAVAILABLE`.
 
 Defaults are one active generation per user and report, 5 starts per rolling
 hour, 20 per rolling day, and 500 globally per rolling day. Stable start codes
@@ -443,8 +444,9 @@ include:
   `Idempotency-Key`, accepts only `FAILED`, creates a new historical generation,
   snapshots current inputs, and reserves a new credit.
 - `POST /reports/:reportId/generations/:generationId/cancel` accepts only
-  `QUEUED`, removes the job, returns the report to `DRAFT`, and releases the
-  reservation. Processing cancellation is deliberately unsupported for MVP.
+  `QUEUED`, removes the job, restores the recorded prior state (`DRAFT` or
+  `FAILED`), and releases the reservation. Processing cancellation is
+  deliberately unsupported for MVP.
 
 Progress is coarse: preparing 5, transcription 10-35, analysis 40-55, content
 60-75, PDF 80-90, upload 95, and completed 100. Stable processing codes include
@@ -455,6 +457,12 @@ Progress is coarse: preparing 5, transcription 10-35, analysis 40-55, content
 `AI_INVALID_RESPONSE`, `PDF_GENERATION_FAILED`,
 `REPORT_OUTPUT_TOO_LARGE`, `GENERATION_TIMEOUT`, and
 `GENERATION_DEPENDENCY_UNAVAILABLE`.
+
+Provider retry state is durable. A duplicate delivery cannot start another
+paid call while a live token-owned attempt exists. An expired attempt is
+recorded as `AI_PROVIDER_ATTEMPT_STALE`; recovery uses the next finite attempt
+number, and exhausted budgets fail before another provider request. Completed
+transcriptions and validated structured report output are resumed.
 
 ## GET /reports/:reportId/output
 

@@ -75,6 +75,15 @@ let retries resume without repeating completed work and enforce call budgets.
 The OpenAI SDK retry count defaults to zero so retries do not multiply across
 SDK, application, and queue layers.
 
+The processing token fences every progress, provider-result, retry, failure,
+and publication mutation. A heartbeat renews only a still-live lease and
+aborts in-flight OpenAI requests when ownership is lost. A live lease cannot
+be stolen; only an expired `PROCESSING` lease can be claimed. Provider attempts
+carry the same token and an expiry: active attempts block duplicate paid calls,
+while stale attempts are closed and remain charged against the durable budget.
+Output keys include the processing token, so stale-worker cleanup cannot delete
+a winner's object.
+
 OpenAI file inputs are temporary and have provider TTL plus best-effort
 deletion. Image inputs use short-lived private S3 URLs with cost-aware low
 detail. Audio is streamed rather than buffered as a 50 MiB object.
@@ -86,8 +95,11 @@ PDFKit renders deterministic server-side pages without a browser or public
 rendering service. The repository embeds OFL-licensed Noto Sans regular/bold
 fonts for English, Ukrainian, German, French, and Spanish. Only model-selected
 images are loaded, preserving aspect ratio; audio/document binaries are never
-embedded. Output is checked for a PDF signature, non-empty bytes, and maximum
-size before private S3 upload.
+embedded. Source and compiled runtime font layouts are both resolved; missing
+fonts fail with a stable error. Aggregate image bytes, page count, and output
+bytes are bounded. Output is checked for a PDF signature and non-empty bytes
+before private S3 upload, then size-matching HEAD verification is required
+before publication.
 
 ## Credits and cost safety
 
@@ -98,9 +110,11 @@ release it. Internal retries reuse the same reservation. Globally unique ledger
 keys make each transition idempotent.
 
 Credit selection is nearest expiry first, subscription-period grants before
-non-expiring purchased grants. Monthly allocation is unique by subscription
-period. Partial database indexes enforce one active generation per report and
-user; rolling hourly, per-user daily, global daily, and global kill-switch
+promotional/admin grants with equal expiry, and non-expiring purchased packs
+last, with `createdAt` and ID as total tie-breakers. Monthly allocation is
+unique by subscription period. Partial database indexes enforce one reserve,
+one mutually exclusive terminal action, and one active generation per report
+and user. Rolling hourly, per-user daily, global daily, and global kill-switch
 checks add cost control. Provider attempts are inserted before calls and cap
 report and per-asset transcription attempts.
 
