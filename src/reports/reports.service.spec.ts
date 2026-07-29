@@ -1,6 +1,7 @@
 import { NotFoundException } from '@nestjs/common';
 import { Report, ReportStatus } from '../../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { ReportAssetsService } from '../report-assets/report-assets.service';
 import { ReportsService } from './reports.service';
 
 const createReport = (overrides: Partial<Report> = {}): Report => ({
@@ -25,6 +26,9 @@ describe('ReportsService', () => {
     updateMany: jest.Mock;
     deleteMany: jest.Mock;
   };
+  let reportAssets: {
+    deleteObjectsForReport: jest.Mock;
+  };
 
   beforeEach(() => {
     report = createReport();
@@ -43,7 +47,13 @@ describe('ReportsService', () => {
       ),
     } as unknown as PrismaService;
 
-    service = new ReportsService(prisma);
+    reportAssets = {
+      deleteObjectsForReport: jest.fn(),
+    };
+    service = new ReportsService(
+      prisma,
+      reportAssets as unknown as ReportAssetsService,
+    );
   });
 
   it('creates a DRAFT report for the authenticated user', async () => {
@@ -156,19 +166,25 @@ describe('ReportsService', () => {
   });
 
   it('deletes an owned report', async () => {
+    reportDelegate.findFirst.mockResolvedValue({ id: report.id });
     reportDelegate.deleteMany.mockResolvedValue({ count: 1 });
 
     await expect(service.delete('user-id', report.id)).resolves.toBeUndefined();
+    expect(reportAssets.deleteObjectsForReport).toHaveBeenCalledWith(
+      'user-id',
+      report.id,
+    );
     expect(reportDelegate.deleteMany).toHaveBeenCalledWith({
       where: { id: report.id, userId: 'user-id' },
     });
   });
 
   it('cannot delete another user’s report', async () => {
-    reportDelegate.deleteMany.mockResolvedValue({ count: 0 });
+    reportDelegate.findFirst.mockResolvedValue(null);
 
     await expect(
       service.delete('user-id', 'foreign-report-id'),
     ).rejects.toBeInstanceOf(NotFoundException);
+    expect(reportAssets.deleteObjectsForReport).not.toHaveBeenCalled();
   });
 });

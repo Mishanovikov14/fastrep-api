@@ -1,6 +1,6 @@
 # FastRep API
 
-FastRep API is the NestJS backend for the FastRep mobile application. The current implementation provides user accounts and JWT-based authentication. Report generation, file storage, AI processing, and PDF generation are planned and are not implemented in this repository yet.
+FastRep API is the NestJS backend for the FastRep mobile application. The current implementation provides user accounts, JWT-based authentication, reports, and private direct-upload storage for report assets. AI processing and PDF generation are not implemented.
 
 ## Current status
 
@@ -9,8 +9,9 @@ The repository currently includes:
 - a NestJS modular monolith;
 - PostgreSQL running locally through Docker Compose;
 - Prisma schema, migrations, and generated client integration;
-- `User`, `PendingRegistration`, `RefreshToken`, `PasswordResetRequest`, and `Report` models;
+- `User`, `PendingRegistration`, `RefreshToken`, `PasswordResetRequest`, `Report`, and `ReportAsset` models;
 - verified-email registration, login, token refresh, logout, current-user, password-recovery, and Reports endpoints;
+- short-lived presigned POST uploads to private S3-compatible object storage;
 - Argon2 password and refresh-token hashing;
 - Resend email delivery behind a generic mail abstraction;
 - DTO validation, unit tests, E2E tests, and lightweight CI.
@@ -33,10 +34,10 @@ React Native client
         | HTTPS REST API
         v
 NestJS backend
-        |
-        | Prisma
-        v
-PostgreSQL
+    |           |
+    | Prisma    | presigned contracts and verification
+    v           v
+PostgreSQL   private S3-compatible storage
 ```
 
 The backend is a modular monolith with thin controllers, service-owned business logic, dependency injection, DTO validation, and direct database access through `PrismaService`. See [Architecture](docs/architecture.md) for details.
@@ -72,6 +73,23 @@ The API listens on `http://localhost:3000` by default. The Docker Compose servic
 | `REGISTRATION_MAX_ATTEMPTS` | No | Incorrect registration-code attempts allowed; defaults to `5`.                         |
 | `REGISTRATION_RESEND_COOLDOWN_SECONDS` | No | Minimum delay between registration emails; defaults to `60`. In production it cannot be lower than `60`. |
 | `PENDING_REGISTRATION_TTL_HOURS` | No | Maximum lifetime of a pending registration; defaults to `24`.                       |
+| `S3_ENDPOINT` | Production | S3-compatible HTTPS endpoint. |
+| `S3_REGION` | Production | S3 signing region. |
+| `S3_BUCKET` | Production | Private report-asset bucket. |
+| `S3_ACCESS_KEY_ID` | Production | Object-storage access key ID. |
+| `S3_SECRET_ACCESS_KEY` | Production | Object-storage secret access key. |
+| `S3_FORCE_PATH_STYLE` | No | Use path-style S3 addressing; defaults to `false`. |
+| `IMAGE_MAX_BYTES` | No | Per-image limit; defaults to `10485760`. |
+| `AUDIO_MAX_BYTES` | No | Per-audio limit; defaults to `52428800`. |
+| `DOCUMENT_MAX_BYTES` | No | Per-document limit; defaults to `26214400`. |
+| `REPORT_MAX_TOTAL_ASSET_BYTES` | No | Reserved plus ready bytes per report; defaults to `157286400`. |
+| `REPORT_MAX_IMAGES` | No | Images per report; defaults to `20`. |
+| `REPORT_MAX_AUDIO_FILES` | No | Audio files per report; defaults to `5`. |
+| `REPORT_MAX_DOCUMENTS` | No | Documents per report; defaults to `10`. |
+| `IMAGE_MAX_WIDTH` / `IMAGE_MAX_HEIGHT` | No | Detected image dimension limits; both default to `4096`. |
+| `AUDIO_MAX_DURATION_SECONDS` | No | Detected audio duration limit; defaults to `1200`. |
+| `UPLOAD_URL_TTL_SECONDS` | No | Presigned upload lifetime; defaults to `600`. |
+| `PENDING_UPLOAD_TTL_MINUTES` | No | Pending-upload reservation lifetime; defaults to `30`. |
 | `NODE_ENV`           | Yes      | Runtime environment. Use `production` for hosted deployments.                              |
 | `PORT`               | Production | HTTP port. Defaults to `3000` outside production.                                        |
 | `SWAGGER_ENABLED`    | Production | Exposes Swagger only when set to `true`.                                                 |
@@ -150,6 +168,19 @@ Authentication includes:
 - `POST /auth/forgot-password`
 - `POST /auth/reset-password`
 - `GET /auth/me`
+
+Report-asset storage includes:
+
+- `POST /reports/:reportId/assets/upload-request`
+- `POST /reports/:reportId/assets/:assetId/confirm`
+- `GET /reports/:reportId/assets`
+- `DELETE /reports/:reportId/assets/:assetId`
+
+The bucket must be private. Upload contracts are short-lived presigned POSTs;
+the API never proxies file bodies or persists presigned URLs. iOS clients must
+convert HEIC/HEIF images to JPEG before requesting a slot. The MVP backend
+accepts actual JPEG, PNG, and WebP images only and does not retain original
+HEIC/HEIF files.
 
 See [Auth API](docs/api.md) for request and response examples.
 

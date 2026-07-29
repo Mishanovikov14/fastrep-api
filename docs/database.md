@@ -1,7 +1,8 @@
 # Database
 
 FastRep uses PostgreSQL through Prisma. Authentication state includes `User`,
-`PendingRegistration`, `RefreshToken`, and `PasswordResetRequest`.
+`PendingRegistration`, `RefreshToken`, `PasswordResetRequest`, `Report`, and
+`ReportAsset`.
 
 ## User
 
@@ -61,6 +62,25 @@ never stored. Indexes support user lookup, expiry cleanup, and latest-request
 lookup. A partial unique database index ensures a user cannot have more than one
 unused reset request at a time. Successful resets atomically update the password,
 consume reset requests, and delete all refresh-token sessions.
+
+## ReportAsset
+
+`ReportAsset` stores metadata for private S3-compatible objects. It contains the
+owning `reportId`, category, lifecycle status, unique opaque `storageKey`,
+sanitized display filename, declared and verified MIME/size values, stable
+position, optional detected dimensions/duration, rejection reason, and
+timestamps. It never stores a public object URL, a presigned URL, credentials,
+or file bytes.
+
+Statuses are `PENDING_UPLOAD`, `READY`, and `REJECTED`; categories are `IMAGE`,
+`AUDIO`, and `DOCUMENT`. Ownership is not duplicated on the asset and is always
+resolved through `Report.userId`. The report relation uses `onDelete: Cascade`.
+Indexes support ordered report listing and pending cleanup; `storageKey` is
+unique.
+
+Rejected records are retained so a failed storage deletion still has a known
+key that can be retried. Report deletion removes known objects before deleting
+the report row and allowing the database cascade to remove asset metadata.
 
 ## Schema changes and migrations
 
