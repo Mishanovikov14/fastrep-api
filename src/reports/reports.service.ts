@@ -1,6 +1,16 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, ReportStatus } from '../../generated/prisma/client';
+import {
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import {
+  Prisma,
+  ReportStatus,
+  StorageCleanupReason,
+} from '../../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { StorageCleanupService } from '../storage/storage-cleanup.service';
 import { CreateReportDto } from './dto/create-report.dto';
 import { UpdateReportDto } from './dto/update-report.dto';
 import {
@@ -11,7 +21,12 @@ import {
 
 @Injectable()
 export class ReportsService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(ReportsService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly storageCleanup: StorageCleanupService,
+  ) {}
 
   create(userId: string, dto: CreateReportDto): Promise<ReportRecord> {
     return this.prisma.report.create({
@@ -82,12 +97,75 @@ export class ReportsService {
   }
 
   async delete(userId: string, id: string): Promise<void> {
-    const deleted = await this.prisma.report.deleteMany({
-      where: { id, userId },
-    });
+    let storageKeys: string[] = [];
 
-    if (deleted.count === 0) {
-      throw new NotFoundException('Report not found');
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        storageKeys = await this.prisma.$transaction(
+          async (transaction) => {
+            const report = await transaction.report.findFirst({
+              where: { id, userId },
+              select: {
+                id: true,
+                assets: { select: { storageKey: true } },
+              },
+            });
+            if (!report) {
+              throw new NotFoundException('Report not found');
+            }
+
+            const keys = report.assets.map((asset) => asset.storageKey);
+            if (keys.length > 0) {
+              await transaction.storageCleanupTask.createMany({
+                data: keys.map((storageKey) => ({
+                  storageKey,
+                  reason: StorageCleanupReason.REPORT_DELETE,
+                })),
+                skipDuplicates: true,
+              });
+            }
+
+            await transaction.report.delete({
+              where: { id: report.id },
+            });
+            return keys;
+          },
+          {
+            isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+          },
+        );
+        break;
+      } catch (error: unknown) {
+        if (!this.isPrismaError(error, 'P2034')) {
+          throw error;
+        }
+        if (attempt === 3) {
+          throw new ConflictException({
+            code: 'REPORT_DELETE_CONFLICT',
+            message: 'The report could not be deleted; retry the request',
+          });
+        }
+      }
     }
+
+    try {
+      await this.storageCleanup.attemptMany(storageKeys);
+    } catch {
+      this.logger.warn({
+        event: 'report_storage_cleanup_dispatch_failed',
+        reportId: id,
+        keyCount: storageKeys.length,
+        errorCode: 'STORAGE_CLEANUP_DISPATCH_FAILED',
+      });
+    }
+  }
+
+  private isPrismaError(error: unknown, code: string): boolean {
+    return (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      error.code === code
+    );
   }
 }

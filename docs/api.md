@@ -214,6 +214,123 @@ Typical error response:
 }
 ```
 
+# Report Assets API
+
+All report-asset endpoints require an access token. Ownership is resolved
+through the report and foreign report/asset combinations return `404`.
+
+## POST /reports/:reportId/assets/upload-request
+
+Creates a `PENDING_UPLOAD` asset for a `DRAFT` report and returns a short-lived
+presigned POST. The client must send the returned form fields unchanged and the
+file body directly to the returned object-storage URL. The API does not accept
+the file body.
+
+```json
+{
+  "type": "IMAGE",
+  "fileName": "photo.jpg",
+  "mimeType": "image/jpeg",
+  "size": 3456789
+}
+```
+
+```json
+{
+  "assetId": "a84c57d4-d7bc-43dc-bcf6-7ea906fa6e18",
+  "upload": {
+    "method": "POST",
+    "url": "<short-lived-provider-url>",
+    "fields": {
+      "key": "<opaque-server-owned-key>",
+      "Content-Type": "image/jpeg",
+      "policy": "<provider-policy>",
+      "x-amz-signature": "<short-lived-signature>"
+    }
+  },
+  "expiresAt": "2026-07-28T12:10:00.000Z"
+}
+```
+
+Supported image MIME types are `image/jpeg`, `image/png`, and `image/webp`.
+HEIC/HEIF is intentionally not accepted. iOS clients must normalize HEIC/HEIF
+to JPEG before requesting a slot; original HEIC files are not persisted.
+Backend image normalization is outside the MVP.
+
+Supported audio MIME types are `audio/mpeg`, `audio/x-m4a`, and `audio/wav`.
+M4A requires an M4A/M4B/M4P ISO BMFF brand; generic `audio/mp4` and ordinary
+MP4 video are rejected. Supported documents are PDF, UTF-8 plain text/CSV,
+DOCX, and XLSX. Legacy DOC/XLS are not accepted because an OLE header alone
+cannot safely distinguish their contents.
+
+The provider policy enforces a non-empty object no larger than the declared
+size. The backend remains authoritative and rechecks actual size after upload.
+Per-type counts include ready assets and unexpired pending reservations.
+Defaults are 10 MiB per image, 50 MiB per audio file, 25 MiB per document,
+150 MiB total per report, 20 images, 5 audio files, and 10 documents. Detected
+images are limited to 4096×4096 and detectable audio duration to 1200 seconds.
+The upload contract lasts 600 seconds and pending reservations expire after 30
+minutes. Every value is configurable through the validated environment
+variables documented in the README.
+
+## POST /reports/:reportId/assets/:assetId/confirm
+
+Returns `200` with ready asset metadata. The backend performs HEAD verification,
+requires the exact declared size, reads only a bounded initial byte range,
+checks the actual signature/category, applies image dimensions and detectable
+audio duration limits, and only then marks the asset `READY`. Repeating confirm
+for a ready asset returns the same asset.
+
+Failed validation records the asset as `REJECTED` and creates a durable
+`StorageCleanupTask` before attempting object deletion. A provider failure
+leaves that task available for retry without exposing provider details. A
+rejected upload cannot be restored by calling confirm.
+
+Stable validation codes include:
+
+- `UNSUPPORTED_ASSET_TYPE`
+- `ASSET_TOO_LARGE`
+- `REPORT_ASSET_LIMIT_EXCEEDED`
+- `REPORT_STORAGE_LIMIT_EXCEEDED`
+- `UPLOAD_NOT_FOUND`
+- `UPLOAD_EXPIRED`
+- `UPLOAD_CONTENT_MISMATCH`
+- `INVALID_IMAGE_DIMENSIONS`
+- `ASSET_NOT_READY`
+- `UPLOAD_SLOT_CONFLICT`
+- `OBJECT_STORAGE_UNAVAILABLE`
+
+Provider errors and raw provider response details are never returned.
+
+## GET /reports/:reportId/assets
+
+Returns only `READY` asset metadata ordered by `position`, then `createdAt`.
+Storage keys, provider fields, credentials, rejection details, and permanent
+public URLs are excluded.
+
+## DELETE /reports/:reportId/assets/:assetId
+
+Atomically stores the object key in `StorageCleanupTask` and removes the
+database asset, then attempts private-object deletion. Success is always `204
+No Content` once database deletion succeeds. A missing object counts as
+successful cleanup. A temporary S3 failure does not keep the asset visible:
+the durable task retains its key and attempt metadata for lazy retry. Repeating
+deletion after the asset is gone is also `204`; a foreign report or an asset
+that exists under another report remains `404`.
+
+Report deletion uses the same database-first outbox model. All asset keys are
+copied to cleanup tasks in the same serializable transaction that deletes the
+owned report. The `ReportAsset` cascade removes metadata, while failed object
+deletions remain retryable and never keep the report visible.
+
+Pending uploads expire after `PENDING_UPLOAD_TTL_MINUTES` (30 by default).
+Expired reservations are ignored by new limit calculations and lazy cleanup
+queues their stale keys. Pending cleanup tasks are retried during later upload
+requests. A scheduled worker may be added later if request-driven cleanup is
+insufficient.
+
+# Authentication API (continued)
+
 ## POST /auth/forgot-password
 
 Requests a six-digit password-reset code by email. Email addresses are trimmed

@@ -3,6 +3,7 @@ import {
   ApiBadRequestResponse,
   ApiBearerAuth,
   ApiCreatedResponse,
+  ApiConflictResponse,
   ApiNoContentResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
@@ -72,7 +73,18 @@ export const ApiUpdateReport = () =>
 export const ApiDeleteReport = () =>
   applyDecorators(
     authenticatedEndpoint(),
-    ApiOperation({ summary: 'Delete one owned report' }),
-    ApiNoContentResponse({ description: 'Report deleted successfully.' }),
+    ApiOperation({
+      summary: 'Delete one owned report',
+      description:
+        'Deletes the report and cascaded asset metadata immediately. Private-object cleanup completes immediately or remains durably queued for retry.',
+    }),
+    ApiNoContentResponse({
+      description:
+        'Report deleted; object cleanup completed or was queued durably.',
+    }),
+    ApiConflictResponse({
+      description:
+        'REPORT_DELETE_CONFLICT: concurrent report changes prevented deletion after bounded retries.',
+    }),
     ApiNotFoundResponse({ description: 'Report not found.' }),
   );

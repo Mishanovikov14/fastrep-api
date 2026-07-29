@@ -1,7 +1,8 @@
 # Database
 
-FastRep uses PostgreSQL through Prisma. Authentication state includes `User`,
-`PendingRegistration`, `RefreshToken`, and `PasswordResetRequest`.
+FastRep uses PostgreSQL through Prisma. Persisted application state includes
+`User`, `PendingRegistration`, `RefreshToken`, `PasswordResetRequest`,
+`Report`, `ReportAsset`, and `StorageCleanupTask`.
 
 ## User
 
@@ -61,6 +62,40 @@ never stored. Indexes support user lookup, expiry cleanup, and latest-request
 lookup. A partial unique database index ensures a user cannot have more than one
 unused reset request at a time. Successful resets atomically update the password,
 consume reset requests, and delete all refresh-token sessions.
+
+## ReportAsset
+
+`ReportAsset` stores metadata for private S3-compatible objects. It contains the
+owning `reportId`, category, lifecycle status, unique opaque `storageKey`,
+sanitized display filename, declared and verified MIME/size values, stable
+position, optional detected dimensions/duration, rejection reason, and
+timestamps. It never stores a public object URL, a presigned URL, credentials,
+or file bytes.
+
+Statuses are `PENDING_UPLOAD`, `READY`, and `REJECTED`; categories are `IMAGE`,
+`AUDIO`, and `DOCUMENT`. Ownership is not duplicated on the asset and is always
+resolved through `Report.userId`. The report relation uses `onDelete: Cascade`.
+Indexes support ordered report listing and pending cleanup; `storageKey` is
+unique.
+
+Rejected records retain validation history. Object-deletion reliability does
+not depend on the asset row: `StorageCleanupTask` durably owns keys pending
+cleanup.
+
+## StorageCleanupTask
+
+Each task contains a unique private `storageKey`, cleanup reason
+(`ASSET_DELETE`, `REPORT_DELETE`, `REJECTED_UPLOAD`, or `EXPIRED_UPLOAD`),
+attempt count, last-attempt time, and timestamps. It intentionally has no
+foreign key to `ReportAsset` or `Report`, so database cascades cannot discard a
+key that still needs object cleanup.
+
+Asset deletion creates/updates the cleanup task and deletes asset metadata in
+one transaction. Report deletion copies every owned key into tasks and deletes
+the report in one serializable transaction; the normal report-to-asset cascade
+then applies. Successful S3 deletion removes the task. Temporary failures
+retain it for lazy retry and produce a structured log containing the cleanup
+task ID and stable internal error code, not provider details.
 
 ## Schema changes and migrations
 

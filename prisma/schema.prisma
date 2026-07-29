@@ -78,6 +78,25 @@ enum ReportStatus {
   FAILED
 }
 
+enum ReportAssetType {
+  IMAGE
+  AUDIO
+  DOCUMENT
+}
+
+enum ReportAssetStatus {
+  PENDING_UPLOAD
+  READY
+  REJECTED
+}
+
+enum StorageCleanupReason {
+  ASSET_DELETE
+  REPORT_DELETE
+  REJECTED_UPLOAD
+  EXPIRED_UPLOAD
+}
+
 model Report {
   id        String       @id @default(uuid())
   userId    String
@@ -88,6 +107,44 @@ model Report {
   updatedAt DateTime     @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assets ReportAsset[]
 
   @@index([userId, createdAt(sort: Desc)])
+}
+
+model ReportAsset {
+  id                String            @id @default(uuid())
+  reportId          String
+  type              ReportAssetType
+  status            ReportAssetStatus @default(PENDING_UPLOAD)
+  storageKey        String            @unique
+  originalFileName  String
+  declaredMimeType  String
+  verifiedMimeType  String?
+  declaredSize      Int
+  verifiedSize      Int?
+  position          Int
+  width             Int?
+  height            Int?
+  durationSeconds   Float?
+  rejectionReason   String?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  report Report @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@index([reportId, position])
+  @@index([status, createdAt])
+}
+
+model StorageCleanupTask {
+  id            String               @id @default(uuid())
+  storageKey    String               @unique
+  reason        StorageCleanupReason
+  attemptCount  Int                  @default(0)
+  lastAttemptAt DateTime?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+
+  @@index([createdAt])
 }
