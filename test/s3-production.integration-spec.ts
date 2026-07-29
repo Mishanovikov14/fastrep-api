@@ -72,11 +72,7 @@ class InMemoryReportAssetPrisma {
   readonly cleanupTasks = new Map<string, CleanupTaskRecord>();
 
   readonly report = {
-    findFirst: ({
-      where,
-    }: {
-      where: { id?: string; userId?: string };
-    }) =>
+    findFirst: ({ where }: { where: { id?: string; userId?: string } }) =>
       Promise.resolve(
         where.id === REPORT_ID && where.userId === USER_ID
           ? { id: REPORT_ID, status: ReportStatus.DRAFT }
@@ -139,11 +135,7 @@ class InMemoryReportAssetPrisma {
       };
       return Promise.resolve({ ...this.currentAsset });
     },
-    findFirst: ({
-      where,
-    }: {
-      where: { id?: string; reportId?: string };
-    }) => {
+    findFirst: ({ where }: { where: { id?: string; reportId?: string } }) => {
       const asset = this.currentAsset;
       return Promise.resolve(
         asset &&
@@ -397,9 +389,7 @@ describe('Production S3 report asset flow', () => {
     expect(uploadedStorageKey).not.toBeNull();
 
     const form = new FormData();
-    for (const [name, value] of Object.entries(
-      uploadContract.upload.fields,
-    )) {
+    for (const [name, value] of Object.entries(uploadContract.upload.fields)) {
       form.append(name, value);
     }
     form.append(
@@ -419,9 +409,7 @@ describe('Production S3 report asset flow', () => {
     expect(storedObject).toEqual({ size: JPEG_BYTES.length });
 
     const confirmation = await request(app.getHttpServer())
-      .post(
-        `/reports/${REPORT_ID}/assets/${uploadContract.assetId}/confirm`,
-      )
+      .post(`/reports/${REPORT_ID}/assets/${uploadContract.assetId}/confirm`)
       .expect(200);
     expect(confirmation.body).toMatchObject({
       id: uploadContract.assetId,
@@ -432,9 +420,7 @@ describe('Production S3 report asset flow', () => {
     expect(confirmation.body).not.toHaveProperty('storageKey');
 
     await request(app.getHttpServer())
-      .delete(
-        `/reports/${REPORT_ID}/assets/${uploadContract.assetId}`,
-      )
+      .delete(`/reports/${REPORT_ID}/assets/${uploadContract.assetId}`)
       .expect(204);
 
     expect(await storage.headObject(uploadedStorageKey!)).toBeNull();
