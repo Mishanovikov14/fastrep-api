@@ -10,6 +10,18 @@ const requireString = (environment: Environment, key: string): string => {
   return value;
 };
 
+const stringWithDefault = (
+  environment: Environment,
+  key: string,
+  defaultValue: string,
+): void => {
+  const value = environment[key] ?? defaultValue;
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error(`${key} must be a non-empty string`);
+  }
+  environment[key] = value;
+};
+
 const positiveIntegerWithDefault = (
   environment: Environment,
   key: string,
@@ -40,6 +52,24 @@ const booleanWithDefault = (
   }
 
   environment[key] = value;
+};
+
+const nonNegativeIntegerWithDefault = (
+  environment: Environment,
+  key: string,
+  defaultValue: number,
+): void => {
+  const value = environment[key] ?? String(defaultValue);
+
+  if (
+    (typeof value !== 'string' && typeof value !== 'number') ||
+    !Number.isInteger(Number(value)) ||
+    Number(value) < 0
+  ) {
+    throw new Error(`${key} must be a non-negative integer`);
+  }
+
+  environment[key] = String(value);
 };
 
 export const validateEnvironment = (environment: Environment): Environment => {
@@ -82,7 +112,77 @@ export const validateEnvironment = (environment: Environment): Environment => {
   positiveIntegerWithDefault(environment, 'AUDIO_MAX_DURATION_SECONDS', 1200);
   positiveIntegerWithDefault(environment, 'UPLOAD_URL_TTL_SECONDS', 600);
   positiveIntegerWithDefault(environment, 'PENDING_UPLOAD_TTL_MINUTES', 30);
+  positiveIntegerWithDefault(environment, 'S3_REQUEST_TIMEOUT_MS', 60_000);
+  positiveIntegerWithDefault(environment, 'OPENAI_REQUEST_TIMEOUT_MS', 180_000);
+  stringWithDefault(environment, 'OPENAI_REPORT_MODEL', 'gpt-5-mini');
+  stringWithDefault(
+    environment,
+    'OPENAI_TRANSCRIPTION_MODEL',
+    'gpt-4o-mini-transcribe',
+  );
+  stringWithDefault(
+    environment,
+    'REPORT_GENERATION_QUEUE_NAME',
+    'report-generation',
+  );
+  nonNegativeIntegerWithDefault(environment, 'OPENAI_MAX_RETRIES', 0);
+  positiveIntegerWithDefault(environment, 'OPENAI_FILE_TTL_SECONDS', 3_600);
+  positiveIntegerWithDefault(environment, 'REPORT_GENERATION_JOB_ATTEMPTS', 2);
+  positiveIntegerWithDefault(
+    environment,
+    'REPORT_GENERATION_JOB_TIMEOUT_MS',
+    900_000,
+  );
+  positiveIntegerWithDefault(
+    environment,
+    'REPORT_GENERATION_BACKOFF_MS',
+    30_000,
+  );
+  positiveIntegerWithDefault(environment, 'REPORT_GENERATION_CONCURRENCY', 1);
+  positiveIntegerWithDefault(
+    environment,
+    'AI_MAX_PROVIDER_CALLS_PER_GENERATION',
+    2,
+  );
+  positiveIntegerWithDefault(
+    environment,
+    'TRANSCRIPTION_MAX_ATTEMPTS_PER_ASSET',
+    2,
+  );
+  positiveIntegerWithDefault(environment, 'AI_MAX_OUTPUT_TOKENS', 6_000);
+  positiveIntegerWithDefault(environment, 'GENERATION_MAX_ACTIVE_PER_USER', 1);
+  positiveIntegerWithDefault(environment, 'GENERATION_START_RATE_LIMIT', 5);
+  positiveIntegerWithDefault(
+    environment,
+    'GENERATION_START_RATE_WINDOW_SECONDS',
+    3_600,
+  );
+  positiveIntegerWithDefault(environment, 'GENERATION_DAILY_SAFETY_LIMIT', 20);
+  positiveIntegerWithDefault(
+    environment,
+    'AI_GLOBAL_DAILY_GENERATION_LIMIT',
+    500,
+  );
+  positiveIntegerWithDefault(
+    environment,
+    'REPORT_OUTPUT_MAX_BYTES',
+    52_428_800,
+  );
+  positiveIntegerWithDefault(environment, 'DOWNLOAD_URL_TTL_SECONDS', 600);
+  booleanWithDefault(environment, 'AI_GENERATION_ENABLED', true);
+  booleanWithDefault(environment, 'ENABLE_DEV_CREDIT_GRANTS', false);
   booleanWithDefault(environment, 'S3_FORCE_PATH_STYLE', false);
+
+  const openAiFileTtl = Number(environment.OPENAI_FILE_TTL_SECONDS);
+  if (openAiFileTtl < 3_600 || openAiFileTtl > 2_592_000) {
+    throw new Error('OPENAI_FILE_TTL_SECONDS must be between 3600 and 2592000');
+  }
+  if (Number(environment.GENERATION_MAX_ACTIVE_PER_USER) !== 1) {
+    throw new Error('GENERATION_MAX_ACTIVE_PER_USER must be 1 for the MVP');
+  }
+  if (Number(environment.OPENAI_MAX_RETRIES) !== 0) {
+    throw new Error('OPENAI_MAX_RETRIES must be 0');
+  }
 
   if (nodeEnvironment === 'production') {
     requireString(environment, 'RESEND_API_KEY');
@@ -92,6 +192,13 @@ export const validateEnvironment = (environment: Environment): Environment => {
     requireString(environment, 'S3_BUCKET');
     requireString(environment, 'S3_ACCESS_KEY_ID');
     requireString(environment, 'S3_SECRET_ACCESS_KEY');
+    requireString(environment, 'REDIS_URL');
+    requireString(environment, 'REPORT_GENERATION_QUEUE_NAME');
+    if (environment.AI_GENERATION_ENABLED === 'true') {
+      requireString(environment, 'OPENAI_API_KEY');
+      requireString(environment, 'OPENAI_REPORT_MODEL');
+      requireString(environment, 'OPENAI_TRANSCRIPTION_MODEL');
+    }
     const port = requireString(environment, 'PORT');
     const swaggerEnabled = requireString(environment, 'SWAGGER_ENABLED');
 

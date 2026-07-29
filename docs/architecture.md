@@ -7,11 +7,13 @@ React Native client
         |
         | HTTPS REST API
         v
-NestJS backend
-    |           |
-    | Prisma    | presigned contracts, HEAD, bounded range reads
-    v           v
-PostgreSQL   private S3-compatible object storage
+NestJS API -> PostgreSQL
+     |
+     v
+BullMQ / Redis -> NestJS worker -> OpenAI
+                         |
+                         v
+                private S3-compatible object storage
 ```
 
 FastRep API is currently a NestJS modular monolith. The mobile client calls JSON REST endpoints. NestJS validates and handles requests, and Prisma is the direct database access layer for PostgreSQL.
@@ -28,6 +30,84 @@ FastRep API is currently a NestJS modular monolith. The mobile client calls JSON
   signature inspection, listing, lazy expiration, and asset deletion.
 - **Storage** wraps the S3-compatible provider. No controller calls the provider
   SDK directly.
+- **Entitlements** owns provider-independent subscriptions, credit grants,
+  reservation/consumption/release, and the `/me/entitlements` projection.
+- **Report Generation** owns lifecycle APIs and the BullMQ producer. The API
+  never runs long AI work inline.
+- **AI** wraps the official OpenAI SDK behind `AiProvider`; orchestration does
+  not import provider-specific clients.
+- **Worker** claims durable generations and coordinates transcription,
+  moderation, structured content, PDF rendering, storage, and terminal state.
+
+## Asynchronous generation flow
+
+```text
+mobile -> API: POST generation + Idempotency-Key
+API -> PostgreSQL (serializable):
+  validate owner/content/limits
+  snapshot inputs
+  reserve one credit
+  create QUEUED generation
+  report -> PROCESSING
+API -> Redis: enqueue unique generation ID
+worker -> PostgreSQL: atomic claim + processing lease
+worker -> private S3: streams/short-lived GETs
+worker -> OpenAI: moderation, cached transcription, Responses structured output
+worker -> PDFKit: validated structured result + selected images
+worker -> private S3: upload and HEAD verification
+worker -> PostgreSQL (atomic):
+  replace output + outbox old key
+  generation -> COMPLETED
+  report -> READY
+  consume reservation
+```
+
+Input snapshots are created at generation creation. Once processing begins,
+report assets and notes are immutable; editing a `FAILED` report explicitly
+returns it to `DRAFT`. A manual retry creates a new snapshot and generation.
+
+The API process is only a BullMQ producer. A separate Railway worker runs
+`npm run start:worker:prod` with bounded concurrency, exponential backoff,
+durable job attempts, and graceful shutdown. A generation ID is the unique job
+ID. Database claim/lease state prevents concurrent duplicate work; completed
+and cancelled deliveries are no-ops. Transcription and provider-attempt ledgers
+let retries resume without repeating completed work and enforce call budgets.
+The OpenAI SDK retry count defaults to zero so retries do not multiply across
+SDK, application, and queue layers.
+
+OpenAI file inputs are temporary and have provider TTL plus best-effort
+deletion. Image inputs use short-lived private S3 URLs with cost-aware low
+detail. Audio is streamed rather than buffered as a 50 MiB object.
+`responses.parse` plus strict Zod validation produces a versioned structured
+result. Unknown fields and image IDs outside the snapshot are rejected before
+PDF creation.
+
+PDFKit renders deterministic server-side pages without a browser or public
+rendering service. The repository embeds OFL-licensed Noto Sans regular/bold
+fonts for English, Ukrainian, German, French, and Spanish. Only model-selected
+images are loaded, preserving aspect ratio; audio/document binaries are never
+embedded. Output is checked for a PDF signature, non-empty bytes, and maximum
+size before private S3 upload.
+
+## Credits and cost safety
+
+One user request reserves exactly one credit in the generation transaction.
+Success consumes it only in the same transaction that publishes the output.
+Queue failure, queued cancellation, and terminal provider/platform failure
+release it. Internal retries reuse the same reservation. Globally unique ledger
+keys make each transition idempotent.
+
+Credit selection is nearest expiry first, subscription-period grants before
+non-expiring purchased grants. Monthly allocation is unique by subscription
+period. Partial database indexes enforce one active generation per report and
+user; rolling hourly, per-user daily, global daily, and global kill-switch
+checks add cost control. Provider attempts are inserted before calls and cap
+report and per-asset transcription attempts.
+
+Logs contain generation/report IDs, coarse stage, attempt, duration, stable
+error code, and provider request ID when safe. They exclude source text,
+transcripts, media, storage keys, signed URLs, API keys, and raw provider
+responses.
 
 ## Direct report-asset upload flow
 
@@ -138,12 +218,3 @@ tokens.
 - **Safe responses:** Prisma selects and public response types exclude password and refresh-token hashes.
 - **Environment configuration:** database and JWT settings come from environment variables and are validated at startup.
 - **Tracked migrations:** Prisma migrations are committed to Git with schema changes.
-
-## Planned integrations
-
-The following integrations are planned and are not currently implemented:
-
-- an AI provider for report generation;
-- backend PDF generation.
-
-Their data models, modules, APIs, and operational requirements will be designed as separate features.

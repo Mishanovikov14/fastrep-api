@@ -318,10 +318,11 @@ the durable task retains its key and attempt metadata for lazy retry. Repeating
 deletion after the asset is gone is also `204`; a foreign report or an asset
 that exists under another report remains `404`.
 
-Report deletion uses the same database-first outbox model. All asset keys are
-copied to cleanup tasks in the same serializable transaction that deletes the
-owned report. The `ReportAsset` cascade removes metadata, while failed object
-deletions remain retryable and never keep the report visible.
+Report deletion uses the same database-first outbox model. All asset keys and
+the current output key are copied to cleanup tasks in the same serializable
+transaction that deletes the owned report. Database cascades remove metadata,
+while failed object deletions remain retryable and never keep the report
+visible.
 
 Pending uploads expire after `PENDING_UPLOAD_TTL_MINUTES` (30 by default).
 Expired reservations are ignored by new limit calculations and lazy cleanup
@@ -359,3 +360,134 @@ again. Invalid, expired, used, and exhausted codes receive the same safe error.
   "newPassword": "a-new-long-password"
 }
 ```
+
+# AI report generation API
+
+All endpoints require an access token. Foreign report, generation, and output
+combinations return a non-disclosing `404`. Generation requires one
+server-tracked credit; `isPremium` and client-supplied purchase data are never
+authorization.
+
+## GET /me/entitlements
+
+Returns the active/grace subscription without provider identifiers and usable
+grant totals:
+
+```json
+{
+  "subscription": {
+    "planCode": "pro-monthly",
+    "status": "ACTIVE",
+    "currentPeriodEnd": "2026-08-29T12:00:00.000Z"
+  },
+  "generationCredits": {
+    "available": 12,
+    "monthly": 7,
+    "purchased": 5
+  },
+  "canGenerate": true
+}
+```
+
+## POST /reports/:reportId/generations
+
+Requires an `Idempotency-Key` header (maximum 200 characters) and returns `202
+Accepted`. The same user, report, and key returns the original generation and
+does not reserve another credit.
+
+```json
+{
+  "id": "7c81b5a7-b479-40f5-95c7-f478f03266e5",
+  "status": "QUEUED",
+  "stage": "PREPARING",
+  "progress": 0,
+  "errorCode": null,
+  "errorMessage": null,
+  "createdAt": "2026-07-29T12:00:00.000Z",
+  "startedAt": null,
+  "completedAt": null,
+  "cancelledAt": null
+}
+```
+
+The report must be `DRAFT`, have non-empty notes or a `READY` asset, and have
+no pending or rejected asset. Creation snapshots title, notes, language, and
+ordered ready-asset metadata in the same serializable transaction that creates
+the generation, reserves a credit, and moves the report to `PROCESSING`. The
+queue job is created after commit. Enqueue failure marks the generation failed,
+returns the report to `DRAFT`, releases the credit, and returns
+`GENERATION_QUEUE_UNAVAILABLE`.
+
+Defaults are one active generation per user and report, 5 starts per rolling
+hour, 20 per rolling day, and 500 globally per rolling day. Stable start codes
+include:
+
+- `REPORT_HAS_NO_CONTENT`
+- `REPORT_HAS_PENDING_UPLOADS`
+- `REPORT_HAS_REJECTED_ASSETS`
+- `REPORT_NOT_EDITABLE`
+- `GENERATION_ALREADY_ACTIVE`
+- `GENERATION_CREDITS_EXHAUSTED`
+- `GENERATION_DAILY_LIMIT_REACHED`
+- `GENERATION_RATE_LIMITED`
+- `GENERATION_DISABLED`
+- `GENERATION_CREDIT_RESERVATION_FAILED`
+- `GENERATION_QUEUE_UNAVAILABLE`
+
+## Generation status, retry, and cancellation
+
+- `GET /reports/:reportId/generations/latest` returns the newest generation.
+- `GET /reports/:reportId/generations/:generationId` returns coarse persisted
+  stage/progress and sanitized errors.
+- `POST /reports/:reportId/generations/:generationId/retry` requires a new
+  `Idempotency-Key`, accepts only `FAILED`, creates a new historical generation,
+  snapshots current inputs, and reserves a new credit.
+- `POST /reports/:reportId/generations/:generationId/cancel` accepts only
+  `QUEUED`, removes the job, returns the report to `DRAFT`, and releases the
+  reservation. Processing cancellation is deliberately unsupported for MVP.
+
+Progress is coarse: preparing 5, transcription 10-35, analysis 40-55, content
+60-75, PDF 80-90, upload 95, and completed 100. Stable processing codes include
+`GENERATION_NOT_FOUND`, `GENERATION_NOT_RETRYABLE`,
+`GENERATION_NOT_CANCELLABLE`, `CONTENT_NOT_PROCESSABLE`,
+`TRANSCRIPTION_FAILED`, `TRANSCRIPTION_TIMEOUT`,
+`TRANSCRIPTION_UNSUPPORTED`, `AI_RATE_LIMITED`, `AI_UNAVAILABLE`,
+`AI_INVALID_RESPONSE`, `PDF_GENERATION_FAILED`,
+`REPORT_OUTPUT_TOO_LARGE`, `GENERATION_TIMEOUT`, and
+`GENERATION_DEPENDENCY_UNAVAILABLE`.
+
+## GET /reports/:reportId/output
+
+Available only for an owned `READY` report. It returns metadata and never a
+storage key or permanent URL:
+
+```json
+{
+  "id": "8c5a7779-35ad-4ccb-981e-713682e1312f",
+  "generationId": "7c81b5a7-b479-40f5-95c7-f478f03266e5",
+  "type": "PDF",
+  "mimeType": "application/pdf",
+  "size": 123456,
+  "createdAt": "2026-07-29T12:05:00.000Z"
+}
+```
+
+## POST /reports/:reportId/output/download-url
+
+Creates a new short-lived private S3 GET URL without another database row. The
+default lifetime is 600 seconds:
+
+```json
+{
+  "url": "<short-lived-signed-get-url>",
+  "expiresAt": "2026-07-29T12:15:00.000Z"
+}
+```
+
+Source formats remain JPEG/PNG/WebP, MP3/safely branded M4A/WAV, and
+PDF/UTF-8 TXT/CSV/DOCX/XLSX. HEIC/HEIF must be converted to JPEG by mobile.
+Generic MP4, legacy DOC/XLS, rejected assets, and pending assets never enter AI
+requests. Audio is streamed from S3 and completed transcriptions are reused.
+Documents are streamed into temporary provider files with a TTL and best-effort
+deletion. Signed URLs, storage keys, provider file IDs, raw media, transcripts,
+and raw provider error payloads are never returned or logged.

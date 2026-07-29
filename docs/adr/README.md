@@ -8,4 +8,6 @@ Architecture Decision Records capture significant technical choices for FastRep 
 | [002](002-use-prisma-with-postgresql.md)        | Accepted | Use Prisma directly with PostgreSQL.        |
 | [003](003-use-jwt-access-and-refresh-tokens.md) | Accepted | Use JWT access and rotating refresh tokens. |
 | [004](004-use-docker-for-local-postgresql.md)   | Accepted | Use Docker Compose for local PostgreSQL.    |
-| [005](005-plan-aws-s3-for-file-storage.md)      | Proposed | Plan AWS S3 for file storage.               |
+| [005](005-plan-aws-s3-for-file-storage.md)      | Accepted | Use private S3 and a cleanup outbox.         |
+| [006](006-use-durable-asynchronous-ai-generation.md) | Accepted | Use BullMQ, a worker, and structured AI output. |
+| [007](007-use-credit-grants-and-an-idempotent-ledger.md) | Accepted | Use grants plus an idempotent credit ledger. |

@@ -23,6 +23,10 @@ model User {
   refreshTokens         RefreshToken[]
   passwordResetRequests PasswordResetRequest[]
   reports               Report[]
+  reportGenerations     ReportGeneration[]
+  subscriptions         UserSubscription[]
+  generationCreditGrants GenerationCreditGrant[]
+  generationCreditTransactions GenerationCreditTransaction[]
 }
 
 model RefreshToken {
@@ -95,6 +99,81 @@ enum StorageCleanupReason {
   REPORT_DELETE
   REJECTED_UPLOAD
   EXPIRED_UPLOAD
+  OUTPUT_REPLACED
+  ORPHAN_OUTPUT
+}
+
+enum ReportGenerationStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum ReportGenerationStage {
+  PREPARING
+  TRANSCRIBING
+  ANALYZING
+  GENERATING_CONTENT
+  GENERATING_PDF
+  UPLOADING_OUTPUT
+  COMPLETED
+}
+
+enum ReportOutputType {
+  PDF
+}
+
+enum AssetTranscriptionStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  GRACE_PERIOD
+  PAST_DUE
+  CANCELLED
+  EXPIRED
+}
+
+enum SubscriptionProvider {
+  MANUAL
+  APPLE
+  GOOGLE
+  WEB
+}
+
+enum GenerationCreditSource {
+  SUBSCRIPTION_MONTHLY
+  PURCHASED_PACK
+  PROMOTIONAL
+  ADMIN
+  REFUND
+}
+
+enum GenerationCreditTransactionType {
+  GRANT
+  RESERVE
+  CONSUME
+  RELEASE
+  REFUND
+  EXPIRE
+}
+
+enum GenerationProviderOperation {
+  MODERATION
+  TRANSCRIPTION
+  REPORT_GENERATION
+}
+
+enum GenerationProviderAttemptStatus {
+  STARTED
+  COMPLETED
+  FAILED
 }
 
 model Report {
@@ -108,6 +187,8 @@ model Report {
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
   assets ReportAsset[]
+  generations ReportGeneration[]
+  output ReportOutput?
 
   @@index([userId, createdAt(sort: Desc)])
 }
@@ -132,9 +213,169 @@ model ReportAsset {
   updatedAt         DateTime          @updatedAt
 
   report Report @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  transcription ReportAssetTranscription?
+  providerAttempts GenerationProviderAttempt[]
 
   @@index([reportId, position])
   @@index([status, createdAt])
+}
+
+model ReportGeneration {
+  id                String                 @id @default(uuid())
+  reportId          String
+  userId            String
+  idempotencyKey    String
+  status            ReportGenerationStatus @default(QUEUED)
+  stage             ReportGenerationStage  @default(PREPARING)
+  progress          Int                    @default(0)
+  attemptCount      Int                    @default(0)
+  errorCode         String?
+  errorMessage      String?
+  provider          String?
+  model             String?
+  providerRequestId String?
+  promptVersion     String
+  inputSnapshot     Json?
+  structuredResult  Json?
+  inputTokens       Int?
+  outputTokens      Int?
+  startedAt         DateTime?
+  completedAt       DateTime?
+  cancelledAt       DateTime?
+  processingToken   String?
+  processingLeaseExpiresAt DateTime?
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+
+  report             Report                        @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  user               User                          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  output             ReportOutput?
+  creditTransactions GenerationCreditTransaction[]
+  providerAttempts   GenerationProviderAttempt[]
+
+  @@unique([userId, reportId, idempotencyKey])
+  @@index([reportId, createdAt(sort: Desc)])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status, createdAt])
+}
+
+model ReportOutput {
+  id           String           @id @default(uuid())
+  reportId     String           @unique
+  generationId String           @unique
+  type         ReportOutputType @default(PDF)
+  storageKey   String           @unique
+  mimeType     String
+  size         Int
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  report     Report           @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  generation ReportGeneration @relation(fields: [generationId], references: [id], onDelete: Cascade)
+}
+
+model ReportAssetTranscription {
+  id                String                   @id @default(uuid())
+  assetId           String                   @unique
+  status            AssetTranscriptionStatus @default(PENDING)
+  text              String?
+  language          String?
+  provider          String?
+  model             String?
+  providerRequestId String?
+  errorCode         String?
+  errorMessage      String?
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+
+  asset ReportAsset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+}
+
+model UserSubscription {
+  id                     String               @id @default(uuid())
+  userId                 String
+  planCode               String
+  status                 SubscriptionStatus
+  provider               SubscriptionProvider
+  providerCustomerId     String?
+  providerSubscriptionId String?
+  currentPeriodStart     DateTime
+  currentPeriodEnd       DateTime
+  cancelAtPeriodEnd      Boolean              @default(false)
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status, currentPeriodEnd])
+  @@unique([provider, providerSubscriptionId])
+}
+
+model GenerationCreditGrant {
+  id                    String                 @id @default(uuid())
+  userId                String
+  source                GenerationCreditSource
+  totalCredits          Int
+  remainingCredits      Int
+  validFrom             DateTime               @default(now())
+  expiresAt             DateTime?
+  subscriptionPeriodKey String?
+  externalPurchaseId    String?
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+
+  user         User                          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions GenerationCreditTransaction[]
+
+  @@unique([userId, subscriptionPeriodKey])
+  @@unique([source, externalPurchaseId])
+  @@index([userId, validFrom, expiresAt])
+}
+
+model GenerationCreditTransaction {
+  id             String                          @id @default(uuid())
+  userId         String
+  generationId   String?
+  grantId        String?
+  type           GenerationCreditTransactionType
+  amount         Int
+  idempotencyKey String                          @unique
+  reason         String
+  createdAt      DateTime                        @default(now())
+
+  user       User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  generation ReportGeneration?     @relation(fields: [generationId], references: [id], onDelete: SetNull)
+  grant      GenerationCreditGrant? @relation(fields: [grantId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([generationId])
+  @@index([grantId])
+}
+
+model GenerationProviderAttempt {
+  id                   String                          @id @default(uuid())
+  generationId         String
+  assetId              String?
+  operation            GenerationProviderOperation
+  attemptNumber        Int
+  status               GenerationProviderAttemptStatus @default(STARTED)
+  provider             String
+  model                String
+  providerRequestId    String?
+  inputTokens          Int?
+  outputTokens         Int?
+  audioDurationSeconds Float?
+  errorCode            String?
+  startedAt            DateTime                        @default(now())
+  completedAt          DateTime?
+  createdAt            DateTime                        @default(now())
+
+  generation ReportGeneration @relation(fields: [generationId], references: [id], onDelete: Cascade)
+  asset      ReportAsset?     @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@unique([generationId, operation, assetId, attemptNumber])
+  @@index([generationId, operation])
+  @@index([assetId, operation])
 }
 
 model StorageCleanupTask {

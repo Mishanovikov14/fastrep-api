@@ -1,8 +1,8 @@
 # Database
 
 FastRep uses PostgreSQL through Prisma. Persisted application state includes
-`User`, `PendingRegistration`, `RefreshToken`, `PasswordResetRequest`,
-`Report`, `ReportAsset`, and `StorageCleanupTask`.
+users, authentication, reports, assets, asynchronous generations, outputs,
+entitlements, credit ledgers, provider-attempt ledgers, and storage cleanup.
 
 ## User
 
@@ -14,7 +14,7 @@ FastRep uses PostgreSQL through Prisma. Persisted application state includes
 | `passwordHash`  | `String`         | Argon2 password hash. A raw password is never stored.                                                          |
 | `language`      | `String`         | Application language; database default is `en`. The registration API accepts `en`, `fr`, `es`, `uk`, and `de`. |
 | `photoUrl`      | `String?`        | Optional profile photo URL.                                                                                    |
-| `isPremium`     | `Boolean`        | Premium flag, defaulting to `false`. No subscription feature is currently implemented.                         |
+| `isPremium`     | `Boolean`        | Compatibility flag only; subscriptions and grants authorize generation.                                       |
 | `emailVerifiedAt` | `DateTime?`    | Time at which registration email verification completed. Existing users are backfilled during migration.       |
 | `createdAt`     | `DateTime`       | Creation timestamp, defaulting to the database insertion time.                                                 |
 | `updatedAt`     | `DateTime`       | Timestamp automatically updated by Prisma on changes.                                                          |
@@ -85,7 +85,8 @@ cleanup.
 ## StorageCleanupTask
 
 Each task contains a unique private `storageKey`, cleanup reason
-(`ASSET_DELETE`, `REPORT_DELETE`, `REJECTED_UPLOAD`, or `EXPIRED_UPLOAD`),
+(`ASSET_DELETE`, `REPORT_DELETE`, `REJECTED_UPLOAD`, `EXPIRED_UPLOAD`,
+`OUTPUT_REPLACED`, or `ORPHAN_OUTPUT`),
 attempt count, last-attempt time, and timestamps. It intentionally has no
 foreign key to `ReportAsset` or `Report`, so database cascades cannot discard a
 key that still needs object cleanup.
@@ -96,6 +97,58 @@ the report in one serializable transaction; the normal report-to-asset cascade
 then applies. Successful S3 deletion removes the task. Temporary failures
 retain it for lazy retry and produce a structured log containing the cleanup
 task ID and stable internal error code, not provider details.
+
+## ReportGeneration and provider attempts
+
+`ReportGeneration` is immutable history for one user-requested generation. It
+contains report/user ownership, HTTP idempotency key, status, coarse stage and
+progress, sanitized failure fields, prompt version, deterministic input
+snapshot, validated structured result, provider/model/request IDs, token usage,
+processing lease, timestamps, and attempt count. A composite unique constraint
+prevents duplicate HTTP reservations. Partial PostgreSQL unique indexes enforce
+at most one `QUEUED`/`PROCESSING` generation per report and per user;
+serializable transactions and bounded `P2034` retries are the application-side
+concurrency strategy.
+
+`GenerationProviderAttempt` is created before moderation, transcription, or
+report generation. It records operation, optional asset, attempt number,
+status, provider/model/request ID, token or audio usage, sanitized error code,
+and timestamps. The worker checks this durable ledger before a provider call,
+so BullMQ retries and SDK retries cannot exceed configured budgets.
+
+Deleting a report cascades generations and provider attempts as deliberate
+user-requested data erasure. Credit transactions use `onDelete: SetNull` for
+generation/grant references so their audit history remains.
+
+## ReportAssetTranscription
+
+One row per audio asset stores `PENDING`, `PROCESSING`, `COMPLETED`, or `FAILED`
+state, transcript, language, provider/model/request ID, and sanitized failure
+fields. The unique asset relation makes a completed transcription reusable.
+Asset deletion cascades it. Non-audio assets never receive this row.
+
+## ReportOutput
+
+The MVP has one unique PDF output per report and one output per generation. It
+stores private storage key, MIME type, verified size, and timestamps—never a
+public or presigned URL. Replacement writes the old key to
+`StorageCleanupTask` in the same transaction that changes the output and marks
+generation/report success. Partial uploads use `ORPHAN_OUTPUT`.
+
+## Entitlements and generation credits
+
+`UserSubscription` stores provider-independent plan/status/period state;
+provider customer/subscription IDs remain internal. `GenerationCreditGrant`
+stores source, total and remaining credits, validity, idempotent subscription
+period key, and external purchase ID. Database checks prevent invalid balances.
+
+`GenerationCreditTransaction` is the append-only ledger for `GRANT`, `RESERVE`,
+`CONSUME`, `RELEASE`, `REFUND`, and `EXPIRE`. Every operation has a unique
+idempotency key. Generation creation decrements one selected grant and writes
+`RESERVE` atomically. Success writes `CONSUME` in the output transaction. Queue
+failure, queued cancellation, or terminal dependency failure restores the
+grant and writes one `RELEASE`. Nearest-expiring grants are selected first,
+then subscription-period credits, then non-expiring purchased packs.
 
 ## Schema changes and migrations
 
