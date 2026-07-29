@@ -291,7 +291,8 @@ class InMemoryReportAssetPrisma {
   }
 
   private publicAsset(asset: ReportAsset): Omit<ReportAsset, 'storageKey'> {
-    const { storageKey: _storageKey, ...publicAsset } = asset;
+    const publicAsset = { ...asset };
+    Reflect.deleteProperty(publicAsset, 'storageKey');
     return publicAsset;
   }
 }
