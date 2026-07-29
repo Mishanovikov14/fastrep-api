@@ -5,7 +5,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Job, Worker } from 'bullmq';
+import { DelayedError, Job, Worker } from 'bullmq';
 import IORedis from 'ioredis';
 import { REPORT_GENERATION_JOB_NAME } from './generation.constants';
 import { ReportGenerationProcessorService } from './report-generation-processor.service';
@@ -77,11 +77,15 @@ export class ReportGenerationWorkerService
     if (job.name !== REPORT_GENERATION_JOB_NAME) {
       return;
     }
-    await this.processor.process(
+    const result = await this.processor.process(
       job.data.generationId,
       job.attemptsMade + 1,
       job.opts.attempts ?? 1,
     );
+    if (result.outcome === 'deferred') {
+      await job.moveToDelayed(result.retryAt.getTime(), job.token);
+      throw new DelayedError();
+    }
   }
 
   private numberSetting(key: string, fallback: number): number {

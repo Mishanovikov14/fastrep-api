@@ -70,8 +70,10 @@ The API process is only a BullMQ producer. A separate Railway worker runs
 `npm run start:worker:prod` with bounded concurrency, exponential backoff,
 durable job attempts, and graceful shutdown. A generation ID is the unique job
 ID. Database claim/lease state prevents concurrent duplicate work; completed
-and cancelled deliveries are no-ops. Transcription and provider-attempt ledgers
-let retries resume without repeating completed work and enforce call budgets.
+and cancelled deliveries are no-ops. A stalled redelivery that encounters a
+still-live database lease is delayed until that lease expires instead of being
+acknowledged as complete. Transcription and provider-attempt ledgers let retries
+resume without repeating completed work and enforce call budgets.
 The OpenAI SDK retry count defaults to zero so retries do not multiply across
 SDK, application, and queue layers.
 

@@ -14,11 +14,16 @@ import { ProviderAttemptsService } from './provider-attempts.service';
 import { ReportGenerationProcessorService } from './report-generation-processor.service';
 
 describe('ReportGenerationProcessorService', () => {
-  it('is a no-op for a duplicate delivery that cannot claim the generation', async () => {
+  it('defers a duplicate delivery while another worker lease is live', async () => {
     const findUniqueOrThrow = jest.fn();
+    const leaseExpiration = new Date(Date.now() + 60_000);
     const prisma = {
       reportGeneration: {
         updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+        findUnique: jest.fn().mockResolvedValue({
+          status: ReportGenerationStatus.PROCESSING,
+          processingLeaseExpiresAt: leaseExpiration,
+        }),
         findUniqueOrThrow,
       },
     } as unknown as PrismaService;
@@ -46,9 +51,10 @@ describe('ReportGenerationProcessorService', () => {
       provider,
     );
 
-    await expect(
-      service.process('generation-id', 1, 2),
-    ).resolves.toBeUndefined();
+    await expect(service.process('generation-id', 1, 2)).resolves.toEqual({
+      outcome: 'deferred',
+      retryAt: new Date(leaseExpiration.getTime() + 1_000),
+    });
     expect(findUniqueOrThrow).not.toHaveBeenCalled();
     expect(provider.generateReport).not.toHaveBeenCalled();
   });

@@ -25,6 +25,7 @@ import { StorageCleanupService } from '../storage/storage-cleanup.service';
 import { AssetTranscriptionsService } from './asset-transcriptions.service';
 import { GENERATION_PROGRESS } from './generation.constants';
 import {
+  GenerationProcessResult,
   GenerationInputSnapshot,
   GenerationSnapshotAsset,
 } from './generation.types';
@@ -66,11 +67,11 @@ export class ReportGenerationProcessorService {
     generationId: string,
     queueAttempt: number,
     maximumQueueAttempts: number,
-  ): Promise<void> {
+  ): Promise<GenerationProcessResult> {
     const processingToken = randomUUID();
     const claimed = await this.claim(generationId, processingToken);
     if (!claimed) {
-      return;
+      return this.resultAfterClaimLoss(generationId);
     }
 
     let uploadedOutputKey: string | undefined;
@@ -376,7 +377,7 @@ export class ReportGenerationProcessorService {
           attempt: queueAttempt,
           errorCode: providerError.code,
         });
-        return;
+        return this.resultAfterClaimLoss(generationId);
       }
       if (uploadedOutputKey) {
         await this.scheduleOrphanCleanup(uploadedOutputKey);
@@ -391,14 +392,17 @@ export class ReportGenerationProcessorService {
         if (prepared) {
           throw providerError;
         }
-        return;
+        return this.resultAfterClaimLoss(generationId);
       }
-      await this.failGeneration(
+      const failed = await this.failGeneration(
         generationId,
         processingToken,
         providerError.code,
         providerError.message,
       );
+      if (!failed) {
+        return this.resultAfterClaimLoss(generationId);
+      }
       this.logger.error({
         event: 'report_generation_failed',
         generationId,
@@ -416,6 +420,7 @@ export class ReportGenerationProcessorService {
         ),
       );
     }
+    return { outcome: 'completed' };
   }
 
   private async claim(
@@ -556,7 +561,7 @@ export class ReportGenerationProcessorService {
     processingToken: string,
     errorCode: string,
     message: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const generation = await this.prisma.$transaction(async (transaction) => {
       const failed = await transaction.reportGeneration.updateMany({
         where: {
@@ -593,7 +598,7 @@ export class ReportGenerationProcessorService {
       return owned;
     });
     if (!generation) {
-      return;
+      return false;
     }
     this.logger.warn({
       event: 'generation_credit_released',
@@ -601,6 +606,29 @@ export class ReportGenerationProcessorService {
       reportId: generation.reportId,
       errorCode,
     });
+    return true;
+  }
+
+  private async resultAfterClaimLoss(
+    generationId: string,
+  ): Promise<GenerationProcessResult> {
+    const generation = await this.prisma.reportGeneration.findUnique({
+      where: { id: generationId },
+      select: {
+        status: true,
+        processingLeaseExpiresAt: true,
+      },
+    });
+    if (generation?.status !== ReportGenerationStatus.PROCESSING) {
+      return { outcome: 'completed' };
+    }
+    const now = Date.now();
+    const leaseExpiration =
+      generation.processingLeaseExpiresAt?.getTime() ?? now;
+    return {
+      outcome: 'deferred',
+      retryAt: new Date(Math.max(now + 1_000, leaseExpiration + 1_000)),
+    };
   }
 
   private async scheduleOrphanCleanup(storageKey: string): Promise<void> {

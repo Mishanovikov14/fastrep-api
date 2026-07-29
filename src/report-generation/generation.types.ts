@@ -38,3 +38,6 @@ export type PublicGeneration = {
   completedAt: Date | null;
   cancelledAt: Date | null;
 };
+
+export type GenerationProcessResult =
+  { outcome: 'completed' } | { outcome: 'deferred'; retryAt: Date };
