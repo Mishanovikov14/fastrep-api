@@ -85,12 +85,26 @@ export class ReportsService {
     dto: UpdateReportDto,
   ): Promise<ReportRecord> {
     const updated = await this.prisma.report.updateMany({
-      where: { id, userId },
-      data: dto,
+      where: {
+        id,
+        userId,
+        status: { in: [ReportStatus.DRAFT, ReportStatus.FAILED] },
+      },
+      data: { ...dto, status: ReportStatus.DRAFT },
     });
 
     if (updated.count === 0) {
-      throw new NotFoundException('Report not found');
+      const owned = await this.prisma.report.findFirst({
+        where: { id, userId },
+        select: { id: true },
+      });
+      if (!owned) {
+        throw new NotFoundException('Report not found');
+      }
+      throw new ConflictException({
+        code: 'REPORT_NOT_EDITABLE',
+        message: 'The report cannot be edited in its current state',
+      });
     }
 
     return this.findOne(userId, id);
@@ -107,14 +121,27 @@ export class ReportsService {
               where: { id, userId },
               select: {
                 id: true,
+                status: true,
                 assets: { select: { storageKey: true } },
+                output: { select: { storageKey: true } },
               },
             });
             if (!report) {
               throw new NotFoundException('Report not found');
             }
 
-            const keys = report.assets.map((asset) => asset.storageKey);
+            if (report.status === ReportStatus.PROCESSING) {
+              throw new ConflictException({
+                code: 'REPORT_NOT_EDITABLE',
+                message:
+                  'A report cannot be deleted while generation is active',
+              });
+            }
+
+            const keys = [
+              ...report.assets.map((asset) => asset.storageKey),
+              ...(report.output ? [report.output.storageKey] : []),
+            ];
             if (keys.length > 0) {
               await transaction.storageCleanupTask.createMany({
                 data: keys.map((storageKey) => ({

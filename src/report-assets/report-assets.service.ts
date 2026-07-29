@@ -273,7 +273,7 @@ export class ReportAssetsService {
     reportId: string,
     assetId: string,
   ): Promise<void> {
-    await this.assertOwnedReport(userId, reportId);
+    await this.assertEditableReport(userId, reportId);
     const asset = await this.prisma.reportAsset.findFirst({
       where: { id: assetId, reportId },
       select: { id: true, storageKey: true },
@@ -516,6 +516,26 @@ export class ReportAssetsService {
 
     if (!report) {
       throw new NotFoundException('Report not found');
+    }
+  }
+
+  private async assertEditableReport(
+    userId: string,
+    reportId: string,
+  ): Promise<void> {
+    const report = await this.prisma.report.findFirst({
+      where: { id: reportId, userId },
+      select: { id: true, status: true },
+    });
+    if (!report) {
+      throw new NotFoundException('Report not found');
+    }
+    if (report.status !== ReportStatus.DRAFT) {
+      throw new ConflictException({
+        code: 'REPORT_NOT_EDITABLE',
+        message:
+          'Report assets can only be changed while the report is a draft',
+      });
     }
   }
 
