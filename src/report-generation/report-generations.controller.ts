@@ -20,7 +20,7 @@ import { CurrentUserId } from '../auth/current-user-id.decorator';
 import { ReportGenerationsService } from './report-generations.service';
 
 @ApiTags('Report generations')
-@ApiBearerAuth()
+@ApiBearerAuth('access-token')
 @UseGuards(AccessTokenGuard)
 @Controller('reports/:reportId/generations')
 export class ReportGenerationsController {
