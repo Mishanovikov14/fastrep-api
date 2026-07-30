@@ -62,10 +62,12 @@ describe('validateEnvironment', () => {
       AI_MAX_PROVIDER_CALLS_PER_GENERATION: '2',
       TRANSCRIPTION_MAX_ATTEMPTS_PER_ASSET: '2',
       AI_MAX_OUTPUT_TOKENS: '6000',
-      GENERATION_MAX_ACTIVE_PER_USER: '1',
       GENERATION_START_RATE_LIMIT: '5',
       GENERATION_START_RATE_WINDOW_SECONDS: '3600',
       GENERATION_DAILY_SAFETY_LIMIT: '20',
+      REPORT_FAILED_RETRY_WINDOW_MINUTES: '3',
+      REPORT_FAILED_RETRY_LIMIT: '5',
+      REPORT_FAILED_LOCK_MINUTES: '60',
       AI_GLOBAL_DAILY_GENERATION_LIMIT: '500',
       REPORT_OUTPUT_MAX_BYTES: '52428800',
       REPORT_PDF_MAX_PAGES: '100',
@@ -143,10 +145,12 @@ describe('validateEnvironment', () => {
     'AI_MAX_PROVIDER_CALLS_PER_GENERATION',
     'TRANSCRIPTION_MAX_ATTEMPTS_PER_ASSET',
     'AI_MAX_OUTPUT_TOKENS',
-    'GENERATION_MAX_ACTIVE_PER_USER',
     'GENERATION_START_RATE_LIMIT',
     'GENERATION_START_RATE_WINDOW_SECONDS',
     'GENERATION_DAILY_SAFETY_LIMIT',
+    'REPORT_FAILED_RETRY_WINDOW_MINUTES',
+    'REPORT_FAILED_RETRY_LIMIT',
+    'REPORT_FAILED_LOCK_MINUTES',
     'AI_GLOBAL_DAILY_GENERATION_LIMIT',
     'REPORT_OUTPUT_MAX_BYTES',
     'REPORT_PDF_MAX_PAGES',
@@ -183,15 +187,6 @@ describe('validateEnvironment', () => {
         OPENAI_FILE_TTL_SECONDS: '3599',
       }),
     ).toThrow('OPENAI_FILE_TTL_SECONDS must be between 3600 and 2592000');
-  });
-
-  it('keeps the MVP active-generation limit at one', () => {
-    expect(() =>
-      validateEnvironment({
-        ...validEnvironment,
-        GENERATION_MAX_ACTIVE_PER_USER: '2',
-      }),
-    ).toThrow('GENERATION_MAX_ACTIVE_PER_USER must be 1 for the MVP');
   });
 
   it('rejects an OpenAI SDK retry count that could multiply call budgets', () => {
@@ -300,6 +295,12 @@ describe('validateEnvironment', () => {
         AI_GLOBAL_DAILY_GENERATION_LIMIT: '1000001',
       }),
     ).toThrow('AI_GLOBAL_DAILY_GENERATION_LIMIT must be between 1 and 1000000');
+    expect(() =>
+      validateEnvironment({
+        ...validEnvironment,
+        REPORT_FAILED_RETRY_LIMIT: '101',
+      }),
+    ).toThrow('REPORT_FAILED_RETRY_LIMIT must be between 1 and 100');
   });
 
   it('requires signed image URLs to outlive the OpenAI request timeout', () => {

@@ -1,6 +1,8 @@
 import { ConfigService } from '@nestjs/config';
 import {
   ReportGenerationStatus,
+  ReportOutputType,
+  ReportStatus,
   StorageCleanupReason,
 } from '../../generated/prisma/client';
 import { AiProviderError } from '../ai/ai-provider.interface';
@@ -35,9 +37,7 @@ describe('ReportGenerationProcessorService', () => {
       deleteTemporaryFile: jest.fn(),
     };
     const config = {
-      get: jest.fn((key: string) =>
-        key === 'REPORT_GENERATION_JOB_TIMEOUT_MS' ? '900000' : 'gpt-5-mini',
-      ),
+      get: jest.fn((key: string) => generationConfigValue(key)),
     } as unknown as ConfigService;
     const service = new ReportGenerationProcessorService(
       prisma,
@@ -175,12 +175,160 @@ describe('ReportGenerationProcessorService', () => {
       },
       update: { reason: StorageCleanupReason.OUTPUT_REPLACED },
     });
-    expect(transaction.reportOutput.upsert).toHaveBeenCalled();
-    expect(transaction.report.update).toHaveBeenCalled();
+    expect(transaction.reportOutput.upsert).toHaveBeenCalledWith({
+      where: { reportId: 'report-id' },
+      create: {
+        reportId: 'report-id',
+        generationId: 'generation-id',
+        type: ReportOutputType.PDF,
+        storageKey: 'new-output',
+        mimeType: 'application/pdf',
+        size: 100,
+      },
+      update: {
+        generationId: 'generation-id',
+        storageKey: 'new-output',
+        mimeType: 'application/pdf',
+        size: 100,
+      },
+    });
+    expect(transaction.report.update).toHaveBeenCalledWith({
+      where: { id: 'report-id', userId: 'user-id' },
+      data: {
+        status: ReportStatus.READY,
+        reportConsecutiveFailureCount: 0,
+        reportFailureWindowStartedAt: null,
+        reportGenerationLockedUntil: null,
+      },
+    });
     expect(consumeInTransaction).toHaveBeenCalledTimes(1);
     expect(
       transaction.storageCleanupTask.upsert.mock.invocationCallOrder[0],
     ).toBeLessThan(transaction.reportOutput.upsert.mock.invocationCallOrder[0]);
+  });
+
+  it('marks a first failed generation and releases its reserved credit', async () => {
+    const now = new Date('2026-07-30T12:00:00.000Z');
+    jest.useFakeTimers().setSystemTime(now);
+    const fixture = createFailureFixture({
+      output: null,
+      reportId: 'report-one',
+      consecutiveFailures: 0,
+      windowStartedAt: null,
+    });
+
+    await expect(
+      fixture.service['failGeneration'](
+        'generation-id',
+        'worker-token',
+        'AI_UNAVAILABLE',
+        'AI provider request failed',
+      ),
+    ).resolves.toBe(true);
+
+    expect(fixture.report.update).toHaveBeenCalledWith({
+      where: { id: 'report-one' },
+      data: {
+        status: ReportStatus.FAILED,
+        reportConsecutiveFailureCount: 1,
+        reportFailureWindowStartedAt: now,
+        reportGenerationLockedUntil: null,
+      },
+    });
+    expect(fixture.credits.releaseInTransaction).toHaveBeenCalledTimes(1);
+    jest.useRealTimers();
+  });
+
+  it('preserves an older successful output and READY status after regeneration fails', async () => {
+    const fixture = createFailureFixture({
+      output: { id: 'existing-output' },
+      reportId: 'report-one',
+      consecutiveFailures: 0,
+      windowStartedAt: null,
+    });
+
+    await fixture.service['failGeneration'](
+      'generation-id',
+      'worker-token',
+      'PDF_GENERATION_FAILED',
+      'PDF generation failed',
+    );
+
+    expect(fixture.report.update).toHaveBeenCalledWith({
+      where: { id: 'report-one' },
+      data: {
+        status: ReportStatus.READY,
+        reportConsecutiveFailureCount: 1,
+        reportFailureWindowStartedAt: expect.any(Date) as Date,
+        reportGenerationLockedUntil: null,
+      },
+    });
+  });
+
+  it('locks only the failed report after five failures within the window', async () => {
+    const now = new Date('2026-07-30T12:00:00.000Z');
+    jest.useFakeTimers().setSystemTime(now);
+    const fixture = createFailureFixture({
+      output: null,
+      reportId: 'failed-report',
+      consecutiveFailures: 4,
+      windowStartedAt: new Date('2026-07-30T11:58:00.000Z'),
+    });
+
+    await fixture.service['failGeneration'](
+      'generation-id',
+      'worker-token',
+      'AI_TIMEOUT',
+      'AI provider request timed out',
+    );
+
+    expect(fixture.report.findUniqueOrThrow).toHaveBeenCalledWith({
+      where: { id: 'failed-report' },
+      select: {
+        reportFailureWindowStartedAt: true,
+        reportConsecutiveFailureCount: true,
+        output: { select: { id: true } },
+      },
+    });
+    expect(fixture.report.update).toHaveBeenCalledWith({
+      where: { id: 'failed-report' },
+      data: {
+        status: ReportStatus.FAILED,
+        reportConsecutiveFailureCount: 5,
+        reportFailureWindowStartedAt: new Date('2026-07-30T11:58:00.000Z'),
+        reportGenerationLockedUntil: new Date('2026-07-30T13:00:00.000Z'),
+      },
+    });
+    jest.useRealTimers();
+  });
+
+  it('starts a new consecutive-failure window after the prior window expires', async () => {
+    const now = new Date('2026-07-30T12:04:00.000Z');
+    jest.useFakeTimers().setSystemTime(now);
+    const fixture = createFailureFixture({
+      output: null,
+      reportId: 'report-one',
+      consecutiveFailures: 4,
+      windowStartedAt: new Date('2026-07-30T12:00:00.000Z'),
+    });
+
+    await fixture.service['failGeneration'](
+      'generation-id',
+      'worker-token',
+      'AI_TIMEOUT',
+      'AI provider request timed out',
+    );
+
+    expect(fixture.report.update).toHaveBeenCalledWith({
+      where: { id: 'report-one' },
+      data: {
+        status: ReportStatus.FAILED,
+        reportConsecutiveFailureCount: 1,
+        reportFailureWindowStartedAt: now,
+        reportGenerationLockedUntil: null,
+      },
+    });
+    jest.useRealTimers();
   });
 
   it('durably records orphan output cleanup even when dispatch fails', async () => {
@@ -277,9 +425,7 @@ describe('ReportGenerationProcessorService', () => {
       deleteTemporaryFile: jest.fn(),
     };
     const config = {
-      get: jest.fn((key: string) =>
-        key === 'REPORT_GENERATION_JOB_TIMEOUT_MS' ? '900000' : 'gpt-5-mini',
-      ),
+      get: jest.fn((key: string) => generationConfigValue(key)),
     } as unknown as ConfigService;
     const service = new ReportGenerationProcessorService(
       prisma,
@@ -346,13 +492,14 @@ describe('ReportGenerationProcessorService', () => {
 
 function createProcessor(
   prisma: PrismaService,
-  creditOverrides: { consumeInTransaction?: jest.Mock } = {},
+  creditOverrides: {
+    consumeInTransaction?: jest.Mock;
+    releaseInTransaction?: jest.Mock;
+  } = {},
   cleanupOverrides: { attemptMany?: jest.Mock } = {},
 ): ReportGenerationProcessorService {
   const config = {
-    get: jest.fn((key: string) =>
-      key === 'REPORT_GENERATION_JOB_TIMEOUT_MS' ? '900000' : 'gpt-5-mini',
-    ),
+    get: jest.fn((key: string) => generationConfigValue(key)),
   } as unknown as ConfigService;
   return new ReportGenerationProcessorService(
     prisma,
@@ -371,6 +518,59 @@ function createProcessor(
       deleteTemporaryFile: jest.fn(),
     },
   );
+}
+
+function createFailureFixture(input: {
+  output: { id: string } | null;
+  reportId: string;
+  consecutiveFailures: number;
+  windowStartedAt: Date | null;
+}): {
+  service: ReportGenerationProcessorService;
+  report: {
+    findUniqueOrThrow: jest.Mock;
+    update: jest.Mock;
+  };
+  credits: { releaseInTransaction: jest.Mock };
+} {
+  const reportGeneration = {
+    updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    findUniqueOrThrow: jest
+      .fn()
+      .mockResolvedValue({ reportId: input.reportId }),
+  };
+  const report = {
+    findUniqueOrThrow: jest.fn().mockResolvedValue({
+      reportFailureWindowStartedAt: input.windowStartedAt,
+      reportConsecutiveFailureCount: input.consecutiveFailures,
+      output: input.output,
+    }),
+    update: jest.fn(),
+  };
+  const transaction = { reportGeneration, report };
+  const prisma = {
+    $transaction: jest.fn(
+      (callback: (client: typeof transaction) => Promise<unknown>) =>
+        callback(transaction),
+    ),
+  } as unknown as PrismaService;
+  const credits = { releaseInTransaction: jest.fn() };
+  return {
+    service: createProcessor(prisma, credits),
+    report,
+    credits,
+  };
+}
+
+function generationConfigValue(key: string): string | undefined {
+  const values: Record<string, string> = {
+    OPENAI_REPORT_MODEL: 'gpt-5-mini',
+    REPORT_GENERATION_JOB_TIMEOUT_MS: '900000',
+    REPORT_FAILED_RETRY_WINDOW_MINUTES: '3',
+    REPORT_FAILED_RETRY_LIMIT: '5',
+    REPORT_FAILED_LOCK_MINUTES: '60',
+  };
+  return values[key];
 }
 
 function createPersistedResultFixture(uploadObject: jest.Mock): {
@@ -460,9 +660,7 @@ function createPersistedResultFixture(uploadObject: jest.Mock): {
     generate: jest.fn().mockResolvedValue(Uint8Array.from([1, 2, 3, 4])),
   };
   const config = {
-    get: jest.fn((key: string) =>
-      key === 'REPORT_GENERATION_JOB_TIMEOUT_MS' ? '900000' : 'gpt-5-mini',
-    ),
+    get: jest.fn((key: string) => generationConfigValue(key)),
   } as unknown as ConfigService;
   const service = new ReportGenerationProcessorService(
     prisma,

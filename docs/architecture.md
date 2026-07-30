@@ -59,12 +59,22 @@ worker -> PostgreSQL (atomic):
   replace output + outbox old key
   generation -> COMPLETED
   report -> READY
+  clear report failure throttle
   consume reservation
 ```
 
-Input snapshots are created at generation creation. Once processing begins,
-report assets and notes are immutable; editing a `FAILED` report explicitly
-returns it to `DRAFT`. A manual retry creates a new snapshot and generation.
+Input snapshots are created at generation creation. The same start flow accepts
+`DRAFT`, `FAILED`, and `READY`, so every retry or regeneration creates immutable
+generation history and a fresh snapshot. Once processing begins, report assets
+and notes are immutable. A compatibility retry endpoint delegates to this same
+flow after verifying ownership of the referenced historical generation.
+
+Only one active generation may exist for a report. A failed first generation
+leaves the report `FAILED`; a failed regeneration preserves the older output
+and returns the report to `READY`. Queued cancellation and enqueue compensation
+restore the exact prior report state. Successful publication replaces the
+output and fully restores report health by clearing the consecutive-failure
+count, failure-window timestamp, and lock timestamp.
 
 The API process is only a BullMQ producer. A separate Railway worker runs
 `npm run start:worker:prod` with bounded concurrency, exponential backoff,
@@ -111,14 +121,25 @@ Queue failure, queued cancellation, and terminal provider/platform failure
 release it. Internal retries reuse the same reservation. Globally unique ledger
 keys make each transition idempotent.
 
+Terminal processing failures are also counted persistently per report. Five
+consecutive failures whose window began within three minutes lock only that
+report for one hour by default. The start transaction rejects an unexpired lock
+with `REPORT_TEMPORARILY_LOCKED`; other reports and ordinary reads remain
+available. Queue failures, cancellation, and recoverable worker retries do not
+count. The next successful generation atomically clears all stale throttle
+metadata. The window, limit, and lock duration are configurable through
+`REPORT_FAILED_RETRY_WINDOW_MINUTES`, `REPORT_FAILED_RETRY_LIMIT`, and
+`REPORT_FAILED_LOCK_MINUTES`.
+
 Credit selection is nearest expiry first, subscription-period grants before
 promotional/admin grants with equal expiry, and non-expiring purchased packs
 last, with `createdAt` and ID as total tie-breakers. Monthly allocation is
 unique by subscription period. Partial database indexes enforce one reserve,
-one mutually exclusive terminal action, and one active generation per report
-and user. Rolling hourly, per-user daily, global daily, and global kill-switch
-checks add cost control. Provider attempts are inserted before calls and cap
-report and per-asset transcription attempts.
+one mutually exclusive terminal action, and one active generation per report.
+Different reports owned by the same user remain independent. Rolling hourly,
+per-user daily, global daily, and global kill-switch checks add cost control.
+Provider attempts are inserted before calls and cap report and per-asset
+transcription attempts.
 
 Logs contain generation/report IDs, coarse stage, attempt, duration, stable
 error code, and provider request ID when safe. They exclude source text,

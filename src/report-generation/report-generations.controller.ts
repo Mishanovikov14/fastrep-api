@@ -58,7 +58,9 @@ export class ReportGenerationsController {
     return this.generations.findOne(userId, reportId, generationId);
   }
 
-  @ApiAcceptedResponse({ description: 'New retry generation queued' })
+  @ApiAcceptedResponse({
+    description: 'Regeneration queued through the shared generation flow',
+  })
   @ApiHeader({
     name: 'Idempotency-Key',
     required: true,
