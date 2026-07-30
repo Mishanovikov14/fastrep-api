@@ -5,7 +5,7 @@ import { CurrentUserId } from '../auth/current-user-id.decorator';
 import { EntitlementsService } from './entitlements.service';
 
 @ApiTags('Entitlements')
-@ApiBearerAuth()
+@ApiBearerAuth('access-token')
 @UseGuards(AccessTokenGuard)
 @Controller('me/entitlements')
 export class EntitlementsController {

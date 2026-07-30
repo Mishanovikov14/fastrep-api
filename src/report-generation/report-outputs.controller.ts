@@ -5,7 +5,7 @@ import { CurrentUserId } from '../auth/current-user-id.decorator';
 import { ReportOutputsService } from './report-outputs.service';
 
 @ApiTags('Report output')
-@ApiBearerAuth()
+@ApiBearerAuth('access-token')
 @UseGuards(AccessTokenGuard)
 @Controller('reports/:reportId/output')
 export class ReportOutputsController {
