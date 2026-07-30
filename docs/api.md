@@ -411,23 +411,26 @@ credit.
 }
 ```
 
-The report must be `DRAFT`, have non-empty notes or a `READY` asset, and have
-no pending or rejected asset. Creation snapshots title, notes, language, and
+The report may be `DRAFT`, `FAILED`, or `READY`, must have non-empty notes or a
+`READY` asset, and must have no pending or rejected asset. This single endpoint
+also starts every regeneration. Creation snapshots title, notes, language, and
 ordered ready-asset metadata in the same serializable transaction that creates
-the generation, reserves a credit, and moves the report to `PROCESSING`. The
-queue job is created after commit. Enqueue failure restores the report's exact
-prior state, releases the credit, removes the unusable generation so the same
-key can be retried, and returns `GENERATION_QUEUE_UNAVAILABLE`.
+the generation, reserves a credit, records the exact prior report state, and
+moves the report to `PROCESSING`. The queue job is created after commit.
+Enqueue failure restores the report's prior state, releases the credit, removes
+the unusable generation so the same key can be retried, and returns
+`GENERATION_QUEUE_UNAVAILABLE`.
 
-Defaults are one active generation per user and report, 5 starts per rolling
-hour, 20 per rolling day, and 500 globally per rolling day. Stable start codes
-include:
+Defaults are one active generation per report, 5 starts per user per rolling
+hour, 20 per user per rolling day, and 500 globally per rolling day. Stable
+start codes include:
 
 - `REPORT_HAS_NO_CONTENT`
 - `REPORT_HAS_PENDING_UPLOADS`
 - `REPORT_HAS_REJECTED_ASSETS`
 - `REPORT_NOT_EDITABLE`
 - `GENERATION_ALREADY_ACTIVE`
+- `REPORT_TEMPORARILY_LOCKED`
 - `GENERATION_CREDITS_EXHAUSTED`
 - `GENERATION_DAILY_LIMIT_REACHED`
 - `GENERATION_RATE_LIMITED`
@@ -440,18 +443,35 @@ include:
 - `GET /reports/:reportId/generations/latest` returns the newest generation.
 - `GET /reports/:reportId/generations/:generationId` returns coarse persisted
   stage/progress and sanitized errors.
-- `POST /reports/:reportId/generations/:generationId/retry` requires a new
-  `Idempotency-Key`, accepts only `FAILED`, creates a new historical generation,
-  snapshots current inputs, and reserves a new credit.
+- `POST /reports/:reportId/generations/:generationId/retry` is a compatibility
+  alias for the same regeneration flow. It verifies that the referenced
+  generation belongs to the report, requires a new `Idempotency-Key`, snapshots
+  current inputs, and reserves a new credit. It is not restricted to a
+  particular prior generation status.
 - `POST /reports/:reportId/generations/:generationId/cancel` accepts only
-  `QUEUED`, removes the job, restores the recorded prior state (`DRAFT` or
-  `FAILED`), and releases the reservation. Processing cancellation is
+  `QUEUED`, removes the job, restores the recorded prior state (`DRAFT`,
+  `FAILED`, or `READY`), and releases the reservation. Processing cancellation is
   deliberately unsupported for MVP.
+
+Only one generation may be `QUEUED` or `PROCESSING` for a report. Starting
+another returns `409 GENERATION_ALREADY_ACTIVE`. A terminal processing failure
+releases its credit. If an older output exists, it remains downloadable and the
+report returns to `READY`; otherwise the report becomes `FAILED`. A successful
+generation atomically replaces the output, consumes the reserved credit, marks
+the report `READY`, and clears all report failure counters and lock metadata.
+
+Five consecutive terminal processing failures whose failure window began
+within the previous three minutes temporarily lock only that report for one
+hour. A locked start returns `409 REPORT_TEMPORARILY_LOCKED` with
+`lockedUntil`, `retryAfterSeconds`, and `consecutiveFailures`. Queue failures,
+cancellations, and internal retry scheduling do not increment the counter.
+The window, threshold, and lock duration are configured with
+`REPORT_FAILED_RETRY_WINDOW_MINUTES`, `REPORT_FAILED_RETRY_LIMIT`, and
+`REPORT_FAILED_LOCK_MINUTES`.
 
 Progress is coarse: preparing 5, transcription 10-35, analysis 40-55, content
 60-75, PDF 80-90, upload 95, and completed 100. Stable processing codes include
-`GENERATION_NOT_FOUND`, `GENERATION_NOT_RETRYABLE`,
-`GENERATION_NOT_CANCELLABLE`, `CONTENT_NOT_PROCESSABLE`,
+`GENERATION_NOT_FOUND`, `GENERATION_NOT_CANCELLABLE`, `CONTENT_NOT_PROCESSABLE`,
 `TRANSCRIPTION_FAILED`, `TRANSCRIPTION_TIMEOUT`,
 `TRANSCRIPTION_UNSUPPORTED`, `AI_RATE_LIMITED`, `AI_UNAVAILABLE`,
 `AI_INVALID_RESPONSE`, `PDF_GENERATION_FAILED`,

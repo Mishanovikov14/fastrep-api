@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   Prisma,
@@ -47,7 +52,7 @@ export class ReportGenerationsService {
     reportId: string,
     idempotencyKey: string,
   ): Promise<PublicGeneration> {
-    return this.start(userId, reportId, idempotencyKey, false);
+    return this.start(userId, reportId, idempotencyKey);
   }
 
   async latest(userId: string, reportId: string): Promise<PublicGeneration> {
@@ -84,14 +89,8 @@ export class ReportGenerationsService {
     generationId: string,
     idempotencyKey: string,
   ): Promise<PublicGeneration> {
-    const previous = await this.findOne(userId, reportId, generationId);
-    if (previous.status !== ReportGenerationStatus.FAILED) {
-      throw conflict(
-        'GENERATION_NOT_RETRYABLE',
-        'Only a failed generation can be retried',
-      );
-    }
-    return this.start(userId, reportId, idempotencyKey, true);
+    await this.findOne(userId, reportId, generationId);
+    return this.start(userId, reportId, idempotencyKey);
   }
 
   async cancel(
@@ -177,7 +176,6 @@ export class ReportGenerationsService {
     userId: string,
     reportId: string,
     idempotencyKey: string,
-    allowFailedReport: boolean,
   ): Promise<PublicGeneration> {
     if (this.config.get<string>('AI_GENERATION_ENABLED') === 'false') {
       throw unavailable('GENERATION_DISABLED', 'Report generation is disabled');
@@ -235,6 +233,9 @@ export class ReportGenerationsService {
                 title: true,
                 notes: true,
                 status: true,
+                reportGenerationLockedUntil: true,
+                reportFailureWindowStartedAt: true,
+                reportConsecutiveFailureCount: true,
                 user: {
                   select: { language: true, emailVerifiedAt: true },
                 },
@@ -262,10 +263,20 @@ export class ReportGenerationsService {
                 'Verify the account email before generating reports',
               );
             }
-            const isAllowed = allowFailedReport
-              ? report.status === ReportStatus.FAILED
-              : report.status === ReportStatus.DRAFT;
-            if (!isAllowed) {
+            if (report.status === ReportStatus.PROCESSING) {
+              throw conflict(
+                'GENERATION_ALREADY_ACTIVE',
+                'A generation is already active',
+              );
+            }
+            this.assertReportUnlocked(report);
+            if (
+              ![
+                ReportStatus.DRAFT,
+                ReportStatus.FAILED,
+                ReportStatus.READY,
+              ].includes(report.status)
+            ) {
               throw conflict(
                 'REPORT_NOT_EDITABLE',
                 'The report is not eligible for generation',
@@ -537,6 +548,25 @@ export class ReportGenerationsService {
 
   private numberSetting(key: string, fallback: number): number {
     return Number(this.config.get<string>(key) ?? fallback);
+  }
+
+  private assertReportUnlocked(report: {
+    reportGenerationLockedUntil: Date | null;
+    reportConsecutiveFailureCount: number;
+  }): void {
+    const lockedUntil = report.reportGenerationLockedUntil;
+    const now = Date.now();
+    if (!lockedUntil || lockedUntil.getTime() <= now) {
+      return;
+    }
+    throw new ConflictException({
+      code: 'REPORT_TEMPORARILY_LOCKED',
+      message:
+        'This report has been temporarily locked because it failed multiple consecutive generation attempts. Please try again later.',
+      lockedUntil,
+      retryAfterSeconds: Math.ceil((lockedUntil.getTime() - now) / 1_000),
+      consecutiveFailures: report.reportConsecutiveFailureCount,
+    });
   }
 
   private isPrismaError(error: unknown, code: string): boolean {

@@ -114,9 +114,9 @@ The API listens on `http://localhost:3000` by default. The Docker Compose servic
 | `AI_MAX_PROVIDER_CALLS_PER_GENERATION` | No | Report-model/moderation call budget per operation; default `2`. |
 | `TRANSCRIPTION_MAX_ATTEMPTS_PER_ASSET` | No | Durable transcription call budget; default `2`. |
 | `AI_MAX_OUTPUT_TOKENS` | No | Responses output cap; default `6000`. |
-| `GENERATION_MAX_ACTIVE_PER_USER` | No | Active-generation ceiling; MVP requires `1`. |
 | `GENERATION_START_RATE_LIMIT` / `GENERATION_START_RATE_WINDOW_SECONDS` | No | Per-user start limit; defaults `5` per `3600` seconds. |
 | `GENERATION_DAILY_SAFETY_LIMIT` / `AI_GLOBAL_DAILY_GENERATION_LIMIT` | No | Per-user/global rolling-day caps; defaults `20` and `500`. |
+| `REPORT_FAILED_RETRY_WINDOW_MINUTES` / `REPORT_FAILED_RETRY_LIMIT` / `REPORT_FAILED_LOCK_MINUTES` | No | Per-report consecutive terminal-failure throttle; defaults to 5 failures within 3 minutes and a 60-minute lock. |
 | `AI_GENERATION_ENABLED` | Production | Strict global generation kill switch. It must be explicit in production; development defaults to `true`. |
 | `REPORT_OUTPUT_MAX_BYTES` / `DOWNLOAD_URL_TTL_SECONDS` | No | PDF size and signed-download lifetime; defaults `52428800` and `600`. |
 | `REPORT_PDF_MAX_PAGES` / `REPORT_PDF_MAX_IMAGE_BYTES` | No | PDF page and aggregate image-byte safeguards; defaults `100` and `52428800`. |

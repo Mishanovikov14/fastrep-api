@@ -44,6 +44,9 @@ export class ReportGenerationProcessorService {
   private readonly logger = new Logger(ReportGenerationProcessorService.name);
   private readonly reportModel: string;
   private readonly jobTimeoutMs: number;
+  private readonly failedRetryWindowMs: number;
+  private readonly failedRetryLimit: number;
+  private readonly failedLockMs: number;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -61,6 +64,14 @@ export class ReportGenerationProcessorService {
     this.jobTimeoutMs = Number(
       config.get<string>('REPORT_GENERATION_JOB_TIMEOUT_MS') ?? '900000',
     );
+    this.failedRetryWindowMs =
+      Number(config.get<string>('REPORT_FAILED_RETRY_WINDOW_MINUTES') ?? '3') *
+      60_000;
+    this.failedRetryLimit = Number(
+      config.get<string>('REPORT_FAILED_RETRY_LIMIT') ?? '5',
+    );
+    this.failedLockMs =
+      Number(config.get<string>('REPORT_FAILED_LOCK_MINUTES') ?? '60') * 60_000;
   }
 
   async process(
@@ -524,7 +535,12 @@ export class ReportGenerationProcessorService {
       }
       await transaction.report.update({
         where: { id: reportId, userId },
-        data: { status: ReportStatus.READY },
+        data: {
+          status: ReportStatus.READY,
+          reportConsecutiveFailureCount: 0,
+          reportFailureWindowStartedAt: null,
+          reportGenerationLockedUntil: null,
+        },
       });
       await this.credits.consumeInTransaction(transaction, generationId);
       return previous?.storageKey === storageKey
@@ -563,6 +579,7 @@ export class ReportGenerationProcessorService {
     message: string,
   ): Promise<boolean> {
     const generation = await this.prisma.$transaction(async (transaction) => {
+      const now = new Date();
       const failed = await transaction.reportGeneration.updateMany({
         where: {
           id: generationId,
@@ -574,7 +591,7 @@ export class ReportGenerationProcessorService {
           status: ReportGenerationStatus.FAILED,
           errorCode,
           errorMessage: message.slice(0, 300),
-          completedAt: new Date(),
+          completedAt: now,
           processingToken: null,
           processingLeaseExpiresAt: null,
         },
@@ -586,9 +603,40 @@ export class ReportGenerationProcessorService {
         where: { id: generationId },
         select: { reportId: true },
       });
+      const report = await transaction.report.findUniqueOrThrow({
+        where: { id: owned.reportId },
+        select: {
+          reportFailureWindowStartedAt: true,
+          reportConsecutiveFailureCount: true,
+          output: { select: { id: true } },
+        },
+      });
+      const failureWindowElapsedMs =
+        report.reportFailureWindowStartedAt === null
+          ? undefined
+          : now.getTime() - report.reportFailureWindowStartedAt.getTime();
+      const withinWindow =
+        failureWindowElapsedMs !== undefined &&
+        failureWindowElapsedMs >= 0 &&
+        failureWindowElapsedMs <= this.failedRetryWindowMs;
+      const consecutiveFailures = withinWindow
+        ? report.reportConsecutiveFailureCount + 1
+        : 1;
+      const windowStartedAt = withinWindow
+        ? report.reportFailureWindowStartedAt
+        : now;
+      const lockedUntil =
+        consecutiveFailures >= this.failedRetryLimit
+          ? new Date(now.getTime() + this.failedLockMs)
+          : null;
       await transaction.report.update({
         where: { id: owned.reportId },
-        data: { status: ReportStatus.FAILED },
+        data: {
+          status: report.output ? ReportStatus.READY : ReportStatus.FAILED,
+          reportConsecutiveFailureCount: consecutiveFailures,
+          reportFailureWindowStartedAt: windowStartedAt,
+          reportGenerationLockedUntil: lockedUntil,
+        },
       });
       await this.credits.releaseInTransaction(
         transaction,

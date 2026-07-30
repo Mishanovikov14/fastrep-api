@@ -69,6 +69,9 @@ describe('ReportGenerationsService', () => {
         title: 'Inspection',
         notes: 'Roof damage',
         status: ReportStatus.DRAFT,
+        reportGenerationLockedUntil: null,
+        reportFailureWindowStartedAt: null,
+        reportConsecutiveFailureCount: 0,
         user: { language: 'en', emailVerifiedAt: new Date() },
         assets: [
           {
@@ -155,6 +158,122 @@ describe('ReportGenerationsService', () => {
       where: { id: 'report-id' },
       data: { status: ReportStatus.PROCESSING },
     });
+  });
+
+  it.each([ReportStatus.FAILED, ReportStatus.READY])(
+    'allows a new generation after report status %s',
+    async (status) => {
+      reportDelegate.findFirst.mockResolvedValue({
+        ...(await reportDelegate.findFirst()),
+        status,
+      });
+
+      await expect(
+        service.create('user-id', 'report-id', `request-${status}`),
+      ).resolves.toEqual(generation);
+
+      const createCall = generationDelegate.create.mock.calls[0] as
+        | [
+            {
+              data: {
+                reportId: string;
+                userId: string;
+                priorReportStatus: ReportStatus;
+              };
+            },
+          ]
+        | undefined;
+      expect(createCall?.[0].data).toMatchObject({
+        reportId: 'report-id',
+        userId: 'user-id',
+        priorReportStatus: status,
+      });
+      expect(credits.reserve).toHaveBeenCalledTimes(1);
+      expect(queue.enqueue).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('returns the stable active-generation conflict for a processing report', async () => {
+    reportDelegate.findFirst.mockResolvedValue({
+      ...(await reportDelegate.findFirst()),
+      status: ReportStatus.PROCESSING,
+    });
+
+    await expect(
+      service.create('user-id', 'report-id', 'request-key'),
+    ).rejects.toMatchObject({
+      response: { code: 'GENERATION_ALREADY_ACTIVE' },
+    });
+    expect(credits.reserve).not.toHaveBeenCalled();
+    expect(queue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('returns durable report-lock metadata without reserving a credit', async () => {
+    const now = new Date('2026-07-30T12:00:00.000Z');
+    const lockedUntil = new Date('2026-07-30T13:00:00.000Z');
+    jest.useFakeTimers().setSystemTime(now);
+    reportDelegate.findFirst.mockResolvedValue({
+      ...(await reportDelegate.findFirst()),
+      status: ReportStatus.READY,
+      reportGenerationLockedUntil: lockedUntil,
+      reportConsecutiveFailureCount: 5,
+    });
+
+    await expect(
+      service.create('user-id', 'report-id', 'request-key'),
+    ).rejects.toMatchObject({
+      response: {
+        code: 'REPORT_TEMPORARILY_LOCKED',
+        lockedUntil,
+        retryAfterSeconds: 3_600,
+        consecutiveFailures: 5,
+      },
+    });
+    expect(credits.reserve).not.toHaveBeenCalled();
+    expect(queue.enqueue).not.toHaveBeenCalled();
+    jest.useRealTimers();
+  });
+
+  it('allows generation automatically after the report lock expires', async () => {
+    const now = new Date('2026-07-30T13:00:01.000Z');
+    jest.useFakeTimers().setSystemTime(now);
+    reportDelegate.findFirst.mockResolvedValue({
+      ...(await reportDelegate.findFirst()),
+      status: ReportStatus.READY,
+      reportGenerationLockedUntil: new Date('2026-07-30T13:00:00.000Z'),
+      reportConsecutiveFailureCount: 5,
+    });
+
+    await expect(
+      service.create('user-id', 'report-id', 'request-after-lock'),
+    ).resolves.toEqual(generation);
+    expect(credits.reserve).toHaveBeenCalledTimes(1);
+    jest.useRealTimers();
+  });
+
+  it('does not let concurrent requests bypass a report lock', async () => {
+    reportDelegate.findFirst.mockResolvedValue({
+      ...(await reportDelegate.findFirst()),
+      status: ReportStatus.FAILED,
+      reportGenerationLockedUntil: new Date(Date.now() + 60_000),
+      reportConsecutiveFailureCount: 5,
+    });
+
+    const outcomes = await Promise.allSettled([
+      service.create('user-id', 'report-id', 'locked-request-1'),
+      service.create('user-id', 'report-id', 'locked-request-2'),
+    ]);
+
+    expect(outcomes).toHaveLength(2);
+    expect(
+      outcomes.every(
+        (outcome) =>
+          outcome.status === 'rejected' &&
+          (outcome.reason as { response?: { code?: string } }).response
+            ?.code === 'REPORT_TEMPORARILY_LOCKED',
+      ),
+    ).toBe(true);
+    expect(credits.reserve).not.toHaveBeenCalled();
   });
 
   it('releases the reservation when queue enqueue fails', async () => {
@@ -345,16 +464,19 @@ describe('ReportGenerationsService', () => {
     });
   });
 
-  it('requires a new credit reservation for a manual retry', async () => {
+  it('delegates the retry endpoint to the same regeneration flow', async () => {
     generationDelegate.findFirst.mockResolvedValue({
       ...generation,
-      status: ReportGenerationStatus.FAILED,
+      status: ReportGenerationStatus.COMPLETED,
     });
     reportDelegate.findFirst.mockResolvedValue({
       id: 'report-id',
       title: 'Inspection',
       notes: 'Roof damage',
-      status: ReportStatus.FAILED,
+      status: ReportStatus.READY,
+      reportGenerationLockedUntil: null,
+      reportFailureWindowStartedAt: null,
+      reportConsecutiveFailureCount: 0,
       user: { language: 'en', emailVerifiedAt: new Date() },
       assets: [
         {

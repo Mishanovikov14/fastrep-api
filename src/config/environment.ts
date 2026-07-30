@@ -162,7 +162,6 @@ export const validateEnvironment = (environment: Environment): Environment => {
     2,
   );
   positiveIntegerWithDefault(environment, 'AI_MAX_OUTPUT_TOKENS', 6_000);
-  positiveIntegerWithDefault(environment, 'GENERATION_MAX_ACTIVE_PER_USER', 1);
   positiveIntegerWithDefault(environment, 'GENERATION_START_RATE_LIMIT', 5);
   positiveIntegerWithDefault(
     environment,
@@ -170,6 +169,13 @@ export const validateEnvironment = (environment: Environment): Environment => {
     3_600,
   );
   positiveIntegerWithDefault(environment, 'GENERATION_DAILY_SAFETY_LIMIT', 20);
+  positiveIntegerWithDefault(
+    environment,
+    'REPORT_FAILED_RETRY_WINDOW_MINUTES',
+    3,
+  );
+  positiveIntegerWithDefault(environment, 'REPORT_FAILED_RETRY_LIMIT', 5);
+  positiveIntegerWithDefault(environment, 'REPORT_FAILED_LOCK_MINUTES', 60);
   positiveIntegerWithDefault(
     environment,
     'AI_GLOBAL_DAILY_GENERATION_LIMIT',
@@ -194,9 +200,6 @@ export const validateEnvironment = (environment: Environment): Environment => {
   const openAiFileTtl = Number(environment.OPENAI_FILE_TTL_SECONDS);
   if (openAiFileTtl < 3_600 || openAiFileTtl > 2_592_000) {
     throw new Error('OPENAI_FILE_TTL_SECONDS must be between 3600 and 2592000');
-  }
-  if (Number(environment.GENERATION_MAX_ACTIVE_PER_USER) !== 1) {
-    throw new Error('GENERATION_MAX_ACTIVE_PER_USER must be 1 for the MVP');
   }
   if (Number(environment.OPENAI_MAX_RETRIES) !== 0) {
     throw new Error('OPENAI_MAX_RETRIES must be 0');
@@ -253,6 +256,14 @@ export const validateEnvironment = (environment: Environment): Environment => {
   );
   assertIntegerRange(environment, 'GENERATION_START_RATE_LIMIT', 1, 1_000);
   assertIntegerRange(environment, 'GENERATION_DAILY_SAFETY_LIMIT', 1, 10_000);
+  assertIntegerRange(
+    environment,
+    'REPORT_FAILED_RETRY_WINDOW_MINUTES',
+    1,
+    1_440,
+  );
+  assertIntegerRange(environment, 'REPORT_FAILED_RETRY_LIMIT', 1, 100);
+  assertIntegerRange(environment, 'REPORT_FAILED_LOCK_MINUTES', 1, 10_080);
   assertIntegerRange(
     environment,
     'AI_GLOBAL_DAILY_GENERATION_LIMIT',

@@ -26,6 +26,22 @@ The language column remains a plain string. API requests use the shared
 supported-language definition, and the data migration maps any legacy `ru`
 values to `en`.
 
+## Report
+
+`Report` stores the user-owned report lifecycle and persistent, report-scoped
+generation throttle. `reportConsecutiveFailureCount` and
+`reportFailureWindowStartedAt` track consecutive terminal processing failures;
+`reportGenerationLockedUntil` records a temporary lock after the configured
+threshold. The fields live on the report, so failures never throttle unrelated
+reports owned by the same user.
+
+Starting a generation from `DRAFT`, `FAILED`, or `READY` records the prior
+status on the generation and moves the report to `PROCESSING`. A failed
+regeneration returns the report to `READY` when an older output exists and
+otherwise to `FAILED`. A successful generation marks the report `READY` and
+atomically resets the failure count to zero and both throttle timestamps to
+`NULL`.
+
 ## PendingRegistration
 
 A pending registration stores normalized email, full name, language, Argon2id
@@ -106,16 +122,23 @@ progress, sanitized failure fields, prompt version, deterministic input
 snapshot, validated structured result, provider/model/request IDs, token usage,
 processing lease, timestamps, and attempt count. A composite unique constraint
 prevents duplicate HTTP reservations. Partial PostgreSQL unique indexes enforce
-at most one `QUEUED`/`PROCESSING` generation per report and per user;
-serializable transactions and bounded `P2034` retries are the application-side
-concurrency strategy.
+at most one `QUEUED`/`PROCESSING` generation per report; separate reports owned
+by the same user can run independently. Serializable transactions and bounded
+`P2034` retries are the application-side concurrency strategy.
 
 `enqueuedAt` distinguishes a committed `QUEUED` row from one acknowledged by
 BullMQ. `priorReportStatus` lets enqueue-failure compensation and queued
-cancellation restore `DRAFT` or `FAILED` exactly. Compensation releases the
-reservation and removes the unusable generation atomically. If Redis accepted
-the job but its acknowledgement was lost, the remaining job cannot claim the
-deleted database row.
+cancellation restore `DRAFT`, `FAILED`, or `READY` exactly. Compensation
+releases the reservation and removes the unusable generation atomically. If
+Redis accepted the job but its acknowledgement was lost, the remaining job
+cannot claim the deleted database row.
+
+Each terminal `FAILED` processing result updates the owning report's failure
+window and counter in the same transaction that marks the generation failed
+and releases its credit. Reaching the configured threshold sets the report
+lock. Queue failures, cancellations, and recoverable internal retries do not
+participate. A completed generation clears the entire throttle state in its
+output-publication transaction.
 
 `GenerationProviderAttempt` is created before moderation, transcription, or
 report generation. It records operation, optional asset, attempt number,
