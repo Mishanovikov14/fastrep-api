@@ -259,13 +259,32 @@ export class ReportAssetsService {
     await this.assertOwnedReport(userId, reportId);
 
     return this.prisma.reportAsset.findMany({
-      where: {
-        reportId,
-        status: ReportAssetStatus.READY,
-      },
+      where: { reportId },
       select: reportAssetSelect,
       orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
     });
+  }
+
+  async createDownloadUrl(userId: string, reportId: string, assetId: string) {
+    const asset = await this.findOwnedAsset(userId, reportId, assetId);
+
+    if (asset.status !== ReportAssetStatus.READY) {
+      throw this.assetError(
+        ASSET_ERROR_CODES.assetNotReady,
+        'Only ready assets can be downloaded',
+      );
+    }
+
+    try {
+      return await this.storage.createPresignedGet(asset.storageKey);
+    } catch {
+      this.logger.error({
+        event: 'report_asset_download_url_failed',
+        assetType: asset.type,
+        errorCode: ASSET_ERROR_CODES.storageUnavailable,
+      });
+      throw this.storageUnavailable();
+    }
   }
 
   async delete(
@@ -578,6 +597,7 @@ export class ReportAssetsService {
       width: asset.width,
       height: asset.height,
       durationSeconds: asset.durationSeconds,
+      rejectionReason: asset.rejectionReason,
       createdAt: asset.createdAt,
       updatedAt: asset.updatedAt,
     };
