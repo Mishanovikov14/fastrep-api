@@ -87,6 +87,7 @@ describe('ReportAssetsService', () => {
   };
   let storage: {
     createPresignedUpload: jest.Mock;
+    createPresignedGet: jest.Mock;
     headObject: jest.Mock;
     readInspectionBytes: jest.Mock;
     deleteObject: jest.Mock;
@@ -127,6 +128,10 @@ describe('ReportAssetsService', () => {
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     };
     storage = {
+      createPresignedGet: jest.fn().mockResolvedValue({
+        url: 'https://storage.example.test/private-download',
+        expiresAt: new Date('2026-07-28T12:10:00.000Z'),
+      }),
       createPresignedUpload: jest.fn().mockResolvedValue({
         method: 'POST',
         url: 'https://storage.example.test/upload',
@@ -591,22 +596,48 @@ describe('ReportAssetsService', () => {
     });
   });
 
-  it('lists only ready assets in stable order', async () => {
+  it('lists ready and rejected assets with safe status metadata in stable order', async () => {
     const ready = createAsset({ status: ReportAssetStatus.READY });
-    assetDelegate.findMany.mockResolvedValue([ready]);
+    const rejected = createAsset({
+      id: 'rejected-asset',
+      position: 1,
+      rejectionReason: 'UPLOAD_CONTENT_MISMATCH',
+      status: ReportAssetStatus.REJECTED,
+    });
+    assetDelegate.findMany.mockResolvedValue([ready, rejected]);
 
     await expect(service.list('user-id', 'report-id')).resolves.toEqual([
       ready,
+      rejected,
     ]);
     expect(assetDelegate.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: {
-          reportId: 'report-id',
-          status: ReportAssetStatus.READY,
-        },
+        where: { reportId: 'report-id' },
         orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
       }),
     );
+  });
+
+  it('returns a fresh private download contract only for a ready owned asset', async () => {
+    const ready = createAsset({ status: ReportAssetStatus.READY });
+    assetDelegate.findFirst.mockResolvedValue(ready);
+
+    await expect(
+      service.createDownloadUrl('user-id', 'report-id', 'asset-id'),
+    ).resolves.toEqual({
+      url: 'https://storage.example.test/private-download',
+      expiresAt: new Date('2026-07-28T12:10:00.000Z'),
+    });
+    expect(storage.createPresignedGet).toHaveBeenCalledWith(ready.storageKey);
+  });
+
+  it('rejects download requests for non-ready assets', async () => {
+    assetDelegate.findFirst.mockResolvedValue(createAsset());
+
+    await expect(
+      service.createDownloadUrl('user-id', 'report-id', 'asset-id'),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(storage.createPresignedGet).not.toHaveBeenCalled();
   });
 
   it('deletes asset metadata and dispatches durable object cleanup', async () => {

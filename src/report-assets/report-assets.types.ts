@@ -15,6 +15,7 @@ export const reportAssetSelect = {
   width: true,
   height: true,
   durationSeconds: true,
+  rejectionReason: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.ReportAssetSelect;

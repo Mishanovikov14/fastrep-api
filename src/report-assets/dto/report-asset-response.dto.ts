@@ -44,6 +44,9 @@ export class ReportAssetResponseDto {
   @ApiPropertyOptional({ type: Number, nullable: true })
   durationSeconds!: number | null;
 
+  @ApiPropertyOptional({ type: String, nullable: true })
+  rejectionReason!: string | null;
+
   @ApiProperty({ type: String, format: 'date-time' })
   createdAt!: Date;
 

@@ -79,12 +79,40 @@ export const ApiConfirmAssetUpload = () =>
 export const ApiListReportAssets = () =>
   applyDecorators(
     authenticatedEndpoint(),
-    ApiOperation({ summary: 'List ready assets for an owned report' }),
+    ApiOperation({ summary: 'List assets for an owned report' }),
     ApiOkResponse({
       type: ReportAssetResponseDto,
       isArray: true,
       description:
-        'Ready asset metadata ordered by position and creation time. Internal keys and provider credentials are excluded.',
+        'Asset metadata and safe rejection codes ordered by position and creation time. Internal keys and provider credentials are excluded.',
+    }),
+  );
+
+export const ApiDownloadReportAsset = () =>
+  applyDecorators(
+    authenticatedEndpoint(),
+    ApiOperation({
+      summary: 'Request a private report-asset download URL',
+      description:
+        'Returns a fresh short-lived URL for a ready asset. The URL must not be persisted or exposed to another user.',
+    }),
+    ApiOkResponse({
+      description: 'A short-lived private download contract.',
+      schema: {
+        type: 'object',
+        required: ['url', 'expiresAt'],
+        properties: {
+          url: { type: 'string', format: 'uri' },
+          expiresAt: { type: 'string', format: 'date-time' },
+        },
+      },
+    }),
+    ApiBadRequestResponse({
+      description: 'ASSET_NOT_READY: only ready assets can be downloaded.',
+    }),
+    ApiServiceUnavailableResponse({
+      description:
+        'OBJECT_STORAGE_UNAVAILABLE: object storage is temporarily unavailable.',
     }),
   );
 

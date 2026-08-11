@@ -18,6 +18,7 @@ import { ReportAssetsService } from './report-assets.service';
 import {
   ApiConfirmAssetUpload,
   ApiDeleteReportAsset,
+  ApiDownloadReportAsset,
   ApiListReportAssets,
   ApiRequestAssetUpload,
 } from './swagger/report-assets.swagger';
@@ -58,6 +59,21 @@ export class ReportAssetsController {
     @Param('reportId') reportId: string,
   ): ReturnType<ReportAssetsService['list']> {
     return this.reportAssetsService.list(userId, reportId);
+  }
+
+  @ApiDownloadReportAsset()
+  @HttpCode(HttpStatus.OK)
+  @Post(':assetId/download-url')
+  createDownloadUrl(
+    @CurrentUserId() userId: string,
+    @Param('reportId') reportId: string,
+    @Param('assetId') assetId: string,
+  ): ReturnType<ReportAssetsService['createDownloadUrl']> {
+    return this.reportAssetsService.createDownloadUrl(
+      userId,
+      reportId,
+      assetId,
+    );
   }
 
   @ApiDeleteReportAsset()
