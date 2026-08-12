@@ -1,7 +1,17 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
-import { NotFoundException } from '@nestjs/common';
-import { Report, ReportStatus } from '../../generated/prisma/client';
+import {
+  ConflictException,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import {
+  Report,
+  ReportAssetStatus,
+  ReportAssetType,
+  ReportStatus,
+} from '../../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { ObjectStorageService } from '../storage/object-storage.service';
 import { StorageCleanupService } from '../storage/storage-cleanup.service';
 import { ReportsService } from './reports.service';
 
@@ -11,10 +21,44 @@ const createReport = (overrides: Partial<Report> = {}): Report => ({
   title: 'Site inspection',
   notes: 'Inspect the roof.',
   status: ReportStatus.DRAFT,
+  reportGenerationLockedUntil: null,
+  reportFailureWindowStartedAt: null,
+  reportConsecutiveFailureCount: 0,
   createdAt: new Date('2026-07-27T10:00:00.000Z'),
   updatedAt: new Date('2026-07-27T10:00:00.000Z'),
   ...overrides,
 });
+
+interface DuplicateAssetCreateData {
+  id: string;
+  originalFileName: string;
+  position: number;
+  status: ReportAssetStatus;
+}
+
+interface DuplicateReportCreateData {
+  assets: { create: DuplicateAssetCreateData[] };
+  id: string;
+  notes: string | null;
+  status: ReportStatus;
+  title: string;
+  userId: string;
+}
+
+const readDuplicateCreateData = (
+  create: jest.Mock,
+): DuplicateReportCreateData => {
+  const calls = create.mock.calls as unknown as Array<
+    [{ data: DuplicateReportCreateData }]
+  >;
+  const input = calls[0]?.[0];
+
+  if (!input) {
+    throw new Error('Expected report create call');
+  }
+
+  return input.data;
+};
 
 describe('ReportsService', () => {
   let service: ReportsService;
@@ -33,6 +77,9 @@ describe('ReportsService', () => {
   };
   let storageCleanup: {
     attemptMany: jest.Mock;
+  };
+  let storage: {
+    copyObject: jest.Mock;
   };
 
   beforeEach(() => {
@@ -73,8 +120,12 @@ describe('ReportsService', () => {
     storageCleanup = {
       attemptMany: jest.fn().mockResolvedValue(undefined),
     };
+    storage = {
+      copyObject: jest.fn().mockResolvedValue({ size: 1_024 }),
+    };
     service = new ReportsService(
       prisma,
+      storage as unknown as ObjectStorageService,
       storageCleanup as unknown as StorageCleanupService,
     );
   });
@@ -177,7 +228,6 @@ describe('ReportsService', () => {
       data: {
         title: updatedReport.title,
         notes: updatedReport.notes,
-        status: ReportStatus.DRAFT,
       },
     });
   });
@@ -192,14 +242,14 @@ describe('ReportsService', () => {
     ).rejects.toBeInstanceOf(NotFoundException);
     expect(reportDelegate.findFirst).toHaveBeenCalledWith({
       where: { id: 'foreign-report-id', userId: 'user-id' },
-      select: { id: true },
+      select: { id: true, status: true },
     });
   });
 
-  it('returns a failed report to DRAFT when it is edited', async () => {
+  it('keeps a failed report FAILED when its source is edited', async () => {
     reportDelegate.updateMany.mockResolvedValue({ count: 1 });
     reportDelegate.findFirst.mockResolvedValue(
-      createReport({ status: ReportStatus.DRAFT }),
+      createReport({ status: ReportStatus.FAILED }),
     );
 
     await service.update('user-id', report.id, { notes: 'Corrected notes' });
@@ -208,10 +258,206 @@ describe('ReportsService', () => {
       expect.objectContaining({
         data: {
           notes: 'Corrected notes',
-          status: ReportStatus.DRAFT,
         },
       }),
     );
+  });
+
+  it.each([
+    [ReportStatus.QUEUED, 'REPORT_GENERATION_ACTIVE'],
+    [ReportStatus.PROCESSING, 'REPORT_GENERATION_ACTIVE'],
+    [ReportStatus.READY, 'REPORT_NOT_EDITABLE'],
+  ])('blocks source updates for %s reports', async (status, code) => {
+    reportDelegate.updateMany.mockResolvedValue({ count: 0 });
+    reportDelegate.findFirst.mockResolvedValue(createReport({ status }));
+
+    const promise = service.update('user-id', report.id, {
+      notes: 'Not allowed',
+    });
+
+    await expect(promise).rejects.toBeInstanceOf(ConflictException);
+    await expect(promise).rejects.toMatchObject({ response: { code } });
+  });
+
+  it('duplicates a READY report into an independent DRAFT with copied READY assets', async () => {
+    reportDelegate.findFirst.mockResolvedValue({
+      id: report.id,
+      title: 'Огляд даху',
+      notes: report.notes,
+      status: ReportStatus.READY,
+      user: { language: 'uk' },
+      assets: [
+        {
+          id: 'source-asset-id',
+          storageKey: 'source-image',
+          type: ReportAssetType.IMAGE,
+          originalFileName: 'Photo 1.jpg',
+          declaredMimeType: 'image/jpeg',
+          verifiedMimeType: 'image/jpeg',
+          declaredSize: 1_024,
+          verifiedSize: 1_024,
+          position: 0,
+          width: 100,
+          height: 80,
+          durationSeconds: null,
+        },
+      ],
+    });
+    reportDelegate.create.mockImplementation((input: unknown) => {
+      const data = (input as { data: DuplicateReportCreateData }).data;
+      return {
+        id: data.id,
+        userId: data.userId,
+        title: data.title,
+        notes: data.notes,
+        status: data.status,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+    });
+
+    const duplicate = await service.duplicate('user-id', report.id);
+
+    expect(duplicate).toMatchObject({
+      title: 'Огляд даху — Копія',
+      status: ReportStatus.DRAFT,
+    });
+    expect(duplicate.id).not.toBe(report.id);
+    expect(storage.copyObject).toHaveBeenCalledWith(
+      'source-image',
+      expect.stringMatching(
+        /^users\/user-id\/reports\/.+\/assets\/.+-[0-9a-f-]+$/u,
+      ),
+    );
+    const createData = readDuplicateCreateData(reportDelegate.create);
+    expect(createData.assets.create).toHaveLength(1);
+    expect(createData.assets.create[0]).toMatchObject({
+      status: ReportAssetStatus.READY,
+      originalFileName: 'Photo 1.jpg',
+      position: 0,
+    });
+    expect(createData.assets.create[0]?.id).not.toBe('source-asset-id');
+    expect(createData).not.toHaveProperty('generations');
+    expect(createData).not.toHaveProperty('output');
+    expect(reportDelegate.updateMany).not.toHaveBeenCalled();
+    expect(reportDelegate.delete).not.toHaveBeenCalled();
+    expect(reportDelegate.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: report.id, userId: 'user-id' },
+        select: expect.objectContaining({
+          assets: expect.objectContaining({
+            where: { status: ReportAssetStatus.READY },
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('truncates a duplicated Unicode title while preserving the suffix', async () => {
+    reportDelegate.findFirst.mockResolvedValue({
+      id: report.id,
+      title: 'Д'.repeat(120),
+      notes: null,
+      status: ReportStatus.READY,
+      user: { language: 'uk' },
+      assets: [],
+    });
+    reportDelegate.create.mockImplementation(
+      (input: unknown) => (input as { data: DuplicateReportCreateData }).data,
+    );
+
+    await service.duplicate('user-id', report.id);
+
+    const title = readDuplicateCreateData(reportDelegate.create).title;
+    expect([...title]).toHaveLength(120);
+    expect(title.endsWith(' — Копія')).toBe(true);
+  });
+
+  it.each([ReportStatus.DRAFT, ReportStatus.FAILED])(
+    'does not duplicate a %s report',
+    async (status) => {
+      reportDelegate.findFirst.mockResolvedValue({
+        id: report.id,
+        title: report.title,
+        notes: report.notes,
+        status,
+        user: { language: 'en' },
+        assets: [],
+      });
+
+      const promise = service.duplicate('user-id', report.id);
+
+      await expect(promise).rejects.toBeInstanceOf(ConflictException);
+      await expect(promise).rejects.toMatchObject({
+        response: { code: 'REPORT_NOT_DUPLICABLE' },
+      });
+      expect(storage.copyObject).not.toHaveBeenCalled();
+      expect(reportDelegate.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not expose another user’s report through duplication', async () => {
+    reportDelegate.findFirst.mockResolvedValue(null);
+
+    await expect(
+      service.duplicate('user-id', 'foreign-report-id'),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(storage.copyObject).not.toHaveBeenCalled();
+  });
+
+  it('rolls back copied objects when duplication fails before DB publication', async () => {
+    reportDelegate.findFirst.mockResolvedValue({
+      id: report.id,
+      title: report.title,
+      notes: report.notes,
+      status: ReportStatus.READY,
+      user: { language: 'en' },
+      assets: [
+        {
+          id: 'first-source-id',
+          storageKey: 'first-source',
+          type: ReportAssetType.IMAGE,
+          originalFileName: 'Photo 1.jpg',
+          declaredMimeType: 'image/jpeg',
+          verifiedMimeType: 'image/jpeg',
+          declaredSize: 1_024,
+          verifiedSize: 1_024,
+          position: 0,
+          width: 100,
+          height: 80,
+          durationSeconds: null,
+        },
+        {
+          id: 'second-source-id',
+          storageKey: 'second-source',
+          type: ReportAssetType.DOCUMENT,
+          originalFileName: 'inspection.pdf',
+          declaredMimeType: 'application/pdf',
+          verifiedMimeType: 'application/pdf',
+          declaredSize: 2_048,
+          verifiedSize: 2_048,
+          position: 1,
+          width: null,
+          height: null,
+          durationSeconds: null,
+        },
+      ],
+    });
+    storage.copyObject
+      .mockResolvedValueOnce({ size: 1_024 })
+      .mockRejectedValueOnce(new Error('storage unavailable'));
+
+    await expect(
+      service.duplicate('user-id', report.id),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+    expect(reportDelegate.create).not.toHaveBeenCalled();
+    expect(cleanupTaskDelegate.createMany).toHaveBeenCalledWith({
+      data: [expect.objectContaining({ reason: 'DUPLICATE_ROLLBACK' })],
+      skipDuplicates: true,
+    });
+    expect(storageCleanup.attemptMany).toHaveBeenCalledWith([
+      expect.stringContaining('/assets/'),
+    ]);
   });
 
   it('deletes an owned report', async () => {

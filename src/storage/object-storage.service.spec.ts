@@ -68,4 +68,26 @@ describe('ObjectStorageService', () => {
       ),
     ).rejects.toThrow('Uploaded object verification failed');
   });
+
+  it('physically copies an object to an independent storage key and verifies it', async () => {
+    send.mockResolvedValueOnce({}).mockResolvedValueOnce({ ContentLength: 4 });
+
+    await expect(
+      service.copyObject(
+        'users/user/reports/source/assets/photo one',
+        'users/user/reports/duplicate/assets/copied',
+      ),
+    ).resolves.toEqual({ size: 4 });
+
+    const calls = send.mock.calls as unknown as Array<[unknown]>;
+    const copyCommand = calls[0]?.[0] as {
+      input: { Bucket: string; CopySource: string; Key: string };
+    };
+    expect(copyCommand.input).toEqual({
+      Bucket: 'private-bucket',
+      CopySource: 'private-bucket/users/user/reports/source/assets/photo%20one',
+      Key: 'users/user/reports/duplicate/assets/copied',
+    });
+    expect(send).toHaveBeenCalledTimes(2);
+  });
 });

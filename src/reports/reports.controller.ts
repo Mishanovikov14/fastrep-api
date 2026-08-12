@@ -21,6 +21,7 @@ import { ReportsService } from './reports.service';
 import {
   ApiCreateReport,
   ApiDeleteReport,
+  ApiDuplicateReport,
   ApiGetReport,
   ApiListReports,
   ApiUpdateReport,
@@ -61,6 +62,12 @@ export class ReportsController {
     @Body() dto: UpdateReportDto,
   ) {
     return this.reportsService.update(userId, id, dto);
+  }
+
+  @ApiDuplicateReport()
+  @Post(':id/duplicate')
+  duplicate(@CurrentUserId() userId: string, @Param('id') id: string) {
+    return this.reportsService.duplicate(userId, id);
   }
 
   @ApiDeleteReport()
