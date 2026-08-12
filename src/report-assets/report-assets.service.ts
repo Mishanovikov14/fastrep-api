@@ -11,10 +11,10 @@ import {
   Prisma,
   ReportAssetStatus,
   ReportAssetType,
-  ReportStatus,
   StorageCleanupReason,
 } from '../../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { assertReportEditable } from '../reports/report-lifecycle';
 import { ObjectStorageService } from '../storage/object-storage.service';
 import { StorageCleanupService } from '../storage/storage-cleanup.service';
 import { StoredObjectMetadata } from '../storage/storage.types';
@@ -62,12 +62,7 @@ export class ReportAssetsService {
       throw new NotFoundException('Report not found');
     }
 
-    if (report.status !== ReportStatus.DRAFT) {
-      throw this.assetError(
-        ASSET_ERROR_CODES.assetNotReady,
-        'Report assets can only be changed while the report is a draft',
-      );
-    }
+    assertReportEditable(report.status);
 
     this.validateDeclaredUpload(dto);
     await this.retryDeferredCleanup();
@@ -127,6 +122,8 @@ export class ReportAssetsService {
         'The upload has been rejected',
       );
     }
+
+    await this.assertEditableReport(userId, reportId);
 
     if (asset.createdAt < this.pendingCutoff()) {
       return this.rejectUpload(
@@ -413,12 +410,7 @@ export class ReportAssetsService {
             if (!report) {
               throw new NotFoundException('Report not found');
             }
-            if (report.status !== ReportStatus.DRAFT) {
-              throw this.assetError(
-                ASSET_ERROR_CODES.assetNotReady,
-                'Report assets can only be changed while the report is a draft',
-              );
-            }
+            assertReportEditable(report.status);
 
             const activeAssets = await transaction.reportAsset.findMany({
               where: {
@@ -549,13 +541,7 @@ export class ReportAssetsService {
     if (!report) {
       throw new NotFoundException('Report not found');
     }
-    if (report.status !== ReportStatus.DRAFT) {
-      throw new ConflictException({
-        code: 'REPORT_NOT_EDITABLE',
-        message:
-          'Report assets can only be changed while the report is a draft',
-      });
-    }
+    assertReportEditable(report.status);
   }
 
   private async rejectUpload(

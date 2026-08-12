@@ -1,4 +1,5 @@
 import {
+  CopyObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
@@ -177,6 +178,28 @@ export class ObjectStorageService {
     const metadata = await this.headObject(storageKey);
     if (!metadata || metadata.size !== bytes.byteLength) {
       throw new Error('Uploaded object verification failed');
+    }
+    return metadata;
+  }
+
+  async copyObject(
+    sourceStorageKey: string,
+    destinationStorageKey: string,
+  ): Promise<StoredObjectMetadata> {
+    this.ensureConfigured();
+    const copySource = [this.bucket, ...sourceStorageKey.split('/')]
+      .map((segment) => encodeURIComponent(segment))
+      .join('/');
+    await this.client.send(
+      new CopyObjectCommand({
+        Bucket: this.bucket,
+        CopySource: copySource,
+        Key: destinationStorageKey,
+      }),
+    );
+    const metadata = await this.headObject(destinationStorageKey);
+    if (!metadata) {
+      throw new Error('Copied object verification failed');
     }
     return metadata;
   }

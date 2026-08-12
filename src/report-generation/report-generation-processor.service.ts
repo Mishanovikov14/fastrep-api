@@ -348,7 +348,7 @@ export class ReportGenerationProcessorService {
         pdfBytes,
         'application/pdf',
       );
-      const replacedKey = await this.finalizeSuccess(
+      await this.finalizeSuccess(
         generationId,
         generation.reportId,
         generation.userId,
@@ -357,17 +357,6 @@ export class ReportGenerationProcessorService {
         pdfBytes.byteLength,
       );
       uploadedOutputKey = undefined;
-      if (replacedKey) {
-        try {
-          await this.cleanup.attemptMany([replacedKey]);
-        } catch {
-          this.logger.warn({
-            event: 'replaced_output_cleanup_deferred',
-            generationId,
-            errorCode: 'STORAGE_CLEANUP_DISPATCH_FAILED',
-          });
-        }
-      }
       this.logger.log({
         event: 'report_generation_completed',
         generationId,
@@ -439,26 +428,42 @@ export class ReportGenerationProcessorService {
     processingToken: string,
   ): Promise<boolean> {
     const now = new Date();
-    const claim = await this.prisma.reportGeneration.updateMany({
-      where: {
-        id: generationId,
-        OR: [
-          { status: ReportGenerationStatus.QUEUED },
-          {
-            status: ReportGenerationStatus.PROCESSING,
-            processingLeaseExpiresAt: { lt: now },
-          },
-        ],
-      },
-      data: {
-        status: ReportGenerationStatus.PROCESSING,
-        processingToken,
-        processingLeaseExpiresAt: new Date(now.getTime() + this.jobTimeoutMs),
-        startedAt: now,
-        attemptCount: { increment: 1 },
-      },
+    return this.prisma.$transaction(async (transaction) => {
+      const claim = await transaction.reportGeneration.updateMany({
+        where: {
+          id: generationId,
+          OR: [
+            { status: ReportGenerationStatus.QUEUED },
+            {
+              status: ReportGenerationStatus.PROCESSING,
+              processingLeaseExpiresAt: { lt: now },
+            },
+          ],
+        },
+        data: {
+          status: ReportGenerationStatus.PROCESSING,
+          processingToken,
+          processingLeaseExpiresAt: new Date(now.getTime() + this.jobTimeoutMs),
+          startedAt: now,
+          attemptCount: { increment: 1 },
+        },
+      });
+      if (claim.count !== 1) {
+        return false;
+      }
+      const generation = await transaction.reportGeneration.findUniqueOrThrow({
+        where: { id: generationId },
+        select: { reportId: true },
+      });
+      await transaction.report.updateMany({
+        where: {
+          id: generation.reportId,
+          status: { in: [ReportStatus.QUEUED, ReportStatus.PROCESSING] },
+        },
+        data: { status: ReportStatus.PROCESSING },
+      });
+      return true;
     });
-    return claim.count === 1;
   }
 
   private async finalizeSuccess(
@@ -468,7 +473,7 @@ export class ReportGenerationProcessorService {
     processingToken: string,
     storageKey: string,
     size: number,
-  ): Promise<string | undefined> {
+  ): Promise<void> {
     return this.prisma.$transaction(async (transaction) => {
       const owned = await transaction.reportGeneration.findFirst({
         where: {
@@ -483,32 +488,11 @@ export class ReportGenerationProcessorService {
       if (!owned) {
         throw this.claimLost();
       }
-      const previous = await transaction.reportOutput.findUnique({
-        where: { reportId },
-        select: { storageKey: true },
-      });
-      if (previous && previous.storageKey !== storageKey) {
-        await transaction.storageCleanupTask.upsert({
-          where: { storageKey: previous.storageKey },
-          create: {
-            storageKey: previous.storageKey,
-            reason: StorageCleanupReason.OUTPUT_REPLACED,
-          },
-          update: { reason: StorageCleanupReason.OUTPUT_REPLACED },
-        });
-      }
-      await transaction.reportOutput.upsert({
-        where: { reportId },
-        create: {
+      await transaction.reportOutput.create({
+        data: {
           reportId,
           generationId,
           type: ReportOutputType.PDF,
-          storageKey,
-          mimeType: 'application/pdf',
-          size,
-        },
-        update: {
-          generationId,
           storageKey,
           mimeType: 'application/pdf',
           size,
@@ -543,9 +527,6 @@ export class ReportGenerationProcessorService {
         },
       });
       await this.credits.consumeInTransaction(transaction, generationId);
-      return previous?.storageKey === storageKey
-        ? undefined
-        : previous?.storageKey;
     });
   }
 
@@ -554,22 +535,38 @@ export class ReportGenerationProcessorService {
     processingToken: string,
     errorCode: string,
   ): Promise<boolean> {
-    const updated = await this.prisma.reportGeneration.updateMany({
-      where: {
-        id: generationId,
-        status: ReportGenerationStatus.PROCESSING,
-        processingToken,
-        processingLeaseExpiresAt: { gt: new Date() },
-      },
-      data: {
-        status: ReportGenerationStatus.QUEUED,
-        errorCode,
-        errorMessage: 'A temporary dependency error occurred; retrying',
-        processingToken: null,
-        processingLeaseExpiresAt: null,
-      },
+    return this.prisma.$transaction(async (transaction) => {
+      const updated = await transaction.reportGeneration.updateMany({
+        where: {
+          id: generationId,
+          status: ReportGenerationStatus.PROCESSING,
+          processingToken,
+          processingLeaseExpiresAt: { gt: new Date() },
+        },
+        data: {
+          status: ReportGenerationStatus.QUEUED,
+          errorCode,
+          errorMessage: 'A temporary dependency error occurred; retrying',
+          processingToken: null,
+          processingLeaseExpiresAt: null,
+        },
+      });
+      if (updated.count !== 1) {
+        return false;
+      }
+      const generation = await transaction.reportGeneration.findUniqueOrThrow({
+        where: { id: generationId },
+        select: { reportId: true },
+      });
+      await transaction.report.updateMany({
+        where: {
+          id: generation.reportId,
+          status: ReportStatus.PROCESSING,
+        },
+        data: { status: ReportStatus.QUEUED },
+      });
+      return true;
     });
-    return updated.count === 1;
   }
 
   private async failGeneration(

@@ -156,12 +156,56 @@ describe('ReportGenerationsService', () => {
     expect(queue.enqueue).toHaveBeenCalledWith(generation.id);
     expect(reportDelegate.update).toHaveBeenCalledWith({
       where: { id: 'report-id' },
-      data: { status: ReportStatus.PROCESSING },
+      data: { status: ReportStatus.QUEUED },
     });
   });
 
-  it.each([ReportStatus.FAILED, ReportStatus.READY])(
-    'allows a new generation after report status %s',
+  it('allows a new generation after report status FAILED', async () => {
+    const status = ReportStatus.FAILED;
+    reportDelegate.findFirst.mockResolvedValue({
+      ...(await reportDelegate.findFirst()),
+      status,
+    });
+
+    await expect(
+      service.create('user-id', 'report-id', `request-${status}`),
+    ).resolves.toEqual(generation);
+
+    const createCall = generationDelegate.create.mock.calls[0] as
+      | [
+          {
+            data: {
+              reportId: string;
+              userId: string;
+              priorReportStatus: ReportStatus;
+            };
+          },
+        ]
+      | undefined;
+    expect(createCall?.[0].data).toMatchObject({
+      reportId: 'report-id',
+      userId: 'user-id',
+      priorReportStatus: status,
+    });
+    expect(credits.reserve).toHaveBeenCalledTimes(1);
+    expect(queue.enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not allow a READY report to regenerate', async () => {
+    reportDelegate.findFirst.mockResolvedValue({
+      ...(await reportDelegate.findFirst()),
+      status: ReportStatus.READY,
+    });
+
+    await expect(
+      service.create('user-id', 'report-id', 'new-request-key'),
+    ).rejects.toMatchObject({ response: { code: 'REPORT_NOT_EDITABLE' } });
+    expect(credits.reserve).not.toHaveBeenCalled();
+    expect(queue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it.each([ReportStatus.QUEUED, ReportStatus.PROCESSING])(
+    'returns the stable active-generation conflict for a %s report',
     async (status) => {
       reportDelegate.findFirst.mockResolvedValue({
         ...(await reportDelegate.findFirst()),
@@ -169,44 +213,14 @@ describe('ReportGenerationsService', () => {
       });
 
       await expect(
-        service.create('user-id', 'report-id', `request-${status}`),
-      ).resolves.toEqual(generation);
-
-      const createCall = generationDelegate.create.mock.calls[0] as
-        | [
-            {
-              data: {
-                reportId: string;
-                userId: string;
-                priorReportStatus: ReportStatus;
-              };
-            },
-          ]
-        | undefined;
-      expect(createCall?.[0].data).toMatchObject({
-        reportId: 'report-id',
-        userId: 'user-id',
-        priorReportStatus: status,
+        service.create('user-id', 'report-id', 'request-key'),
+      ).rejects.toMatchObject({
+        response: { code: 'GENERATION_ALREADY_ACTIVE' },
       });
-      expect(credits.reserve).toHaveBeenCalledTimes(1);
-      expect(queue.enqueue).toHaveBeenCalledTimes(1);
+      expect(credits.reserve).not.toHaveBeenCalled();
+      expect(queue.enqueue).not.toHaveBeenCalled();
     },
   );
-
-  it('returns the stable active-generation conflict for a processing report', async () => {
-    reportDelegate.findFirst.mockResolvedValue({
-      ...(await reportDelegate.findFirst()),
-      status: ReportStatus.PROCESSING,
-    });
-
-    await expect(
-      service.create('user-id', 'report-id', 'request-key'),
-    ).rejects.toMatchObject({
-      response: { code: 'GENERATION_ALREADY_ACTIVE' },
-    });
-    expect(credits.reserve).not.toHaveBeenCalled();
-    expect(queue.enqueue).not.toHaveBeenCalled();
-  });
 
   it('returns durable report-lock metadata without reserving a credit', async () => {
     const now = new Date('2026-07-30T12:00:00.000Z');
@@ -214,7 +228,7 @@ describe('ReportGenerationsService', () => {
     jest.useFakeTimers().setSystemTime(now);
     reportDelegate.findFirst.mockResolvedValue({
       ...(await reportDelegate.findFirst()),
-      status: ReportStatus.READY,
+      status: ReportStatus.FAILED,
       reportGenerationLockedUntil: lockedUntil,
       reportConsecutiveFailureCount: 5,
     });
@@ -239,7 +253,7 @@ describe('ReportGenerationsService', () => {
     jest.useFakeTimers().setSystemTime(now);
     reportDelegate.findFirst.mockResolvedValue({
       ...(await reportDelegate.findFirst()),
-      status: ReportStatus.READY,
+      status: ReportStatus.FAILED,
       reportGenerationLockedUntil: new Date('2026-07-30T13:00:00.000Z'),
       reportConsecutiveFailureCount: 5,
     });
@@ -464,16 +478,16 @@ describe('ReportGenerationsService', () => {
     });
   });
 
-  it('delegates the retry endpoint to the same regeneration flow', async () => {
+  it('delegates a FAILED generation retry to a new generation flow', async () => {
     generationDelegate.findFirst.mockResolvedValue({
       ...generation,
-      status: ReportGenerationStatus.COMPLETED,
+      status: ReportGenerationStatus.FAILED,
     });
     reportDelegate.findFirst.mockResolvedValue({
       id: 'report-id',
       title: 'Inspection',
       notes: 'Roof damage',
-      status: ReportStatus.READY,
+      status: ReportStatus.FAILED,
       reportGenerationLockedUntil: null,
       reportFailureWindowStartedAt: null,
       reportConsecutiveFailureCount: 0,

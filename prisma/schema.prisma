@@ -77,6 +77,7 @@ model PasswordResetRequest {
 
 enum ReportStatus {
   DRAFT
+  QUEUED
   PROCESSING
   READY
   FAILED
@@ -97,6 +98,7 @@ enum ReportAssetStatus {
 enum StorageCleanupReason {
   ASSET_DELETE
   REPORT_DELETE
+  DUPLICATE_ROLLBACK
   REJECTED_UPLOAD
   EXPIRED_UPLOAD
   OUTPUT_REPLACED

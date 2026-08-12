@@ -28,6 +28,14 @@ describe('ReportGenerationProcessorService', () => {
         }),
         findUniqueOrThrow,
       },
+      $transaction: jest.fn((callback: (client: unknown) => Promise<unknown>) =>
+        callback({
+          reportGeneration: {
+            updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+          },
+          report: { updateMany: jest.fn() },
+        }),
+      ),
     } as unknown as PrismaService;
     const provider = {
       generateReport: jest.fn(),
@@ -66,8 +74,19 @@ describe('ReportGenerationProcessorService', () => {
       .fn()
       .mockResolvedValueOnce({ count: 1 })
       .mockResolvedValueOnce({ count: 0 });
+    const findUniqueOrThrow = jest
+      .fn()
+      .mockResolvedValue({ reportId: 'report-id' });
+    const reportUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
+    const transaction = {
+      reportGeneration: { updateMany, findUniqueOrThrow },
+      report: { updateMany: reportUpdateMany },
+    };
     const service = createProcessor({
-      reportGeneration: { updateMany },
+      $transaction: jest.fn(
+        (callback: (client: typeof transaction) => Promise<unknown>) =>
+          callback(transaction),
+      ),
     } as unknown as PrismaService);
 
     await expect(service['claim']('generation-id', 'worker-one')).resolves.toBe(
@@ -95,6 +114,13 @@ describe('ReportGenerationProcessorService', () => {
         attemptCount: { increment: 1 },
       },
     });
+    expect(reportUpdateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'report-id',
+        status: { in: [ReportStatus.QUEUED, ReportStatus.PROCESSING] },
+      },
+      data: { status: ReportStatus.PROCESSING },
+    });
     jest.useRealTimers();
   });
 
@@ -104,10 +130,8 @@ describe('ReportGenerationProcessorService', () => {
         findFirst: jest.fn().mockResolvedValue(null),
       },
       reportOutput: {
-        findUnique: jest.fn(),
-        upsert: jest.fn(),
+        create: jest.fn(),
       },
-      storageCleanupTask: { upsert: jest.fn() },
       report: { update: jest.fn() },
     };
     const prisma = {
@@ -129,22 +153,20 @@ describe('ReportGenerationProcessorService', () => {
         100,
       ),
     ).rejects.toMatchObject({ code: 'GENERATION_CLAIM_LOST' });
-    expect(transaction.reportOutput.upsert).not.toHaveBeenCalled();
+    expect(transaction.reportOutput.create).not.toHaveBeenCalled();
     expect(transaction.report.update).not.toHaveBeenCalled();
     expect(consumeInTransaction).not.toHaveBeenCalled();
   });
 
-  it('atomically queues old output before publication and credit consume', async () => {
+  it('atomically creates one immutable output before credit consume', async () => {
     const transaction = {
       reportGeneration: {
         findFirst: jest.fn().mockResolvedValue({ id: 'generation-id' }),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       reportOutput: {
-        findUnique: jest.fn().mockResolvedValue({ storageKey: 'old-output' }),
-        upsert: jest.fn(),
+        create: jest.fn(),
       },
-      storageCleanupTask: { upsert: jest.fn() },
       report: { update: jest.fn() },
     };
     const prisma = {
@@ -165,28 +187,13 @@ describe('ReportGenerationProcessorService', () => {
         'new-output',
         100,
       ),
-    ).resolves.toBe('old-output');
+    ).resolves.toBeUndefined();
 
-    expect(transaction.storageCleanupTask.upsert).toHaveBeenCalledWith({
-      where: { storageKey: 'old-output' },
-      create: {
-        storageKey: 'old-output',
-        reason: StorageCleanupReason.OUTPUT_REPLACED,
-      },
-      update: { reason: StorageCleanupReason.OUTPUT_REPLACED },
-    });
-    expect(transaction.reportOutput.upsert).toHaveBeenCalledWith({
-      where: { reportId: 'report-id' },
-      create: {
+    expect(transaction.reportOutput.create).toHaveBeenCalledWith({
+      data: {
         reportId: 'report-id',
         generationId: 'generation-id',
         type: ReportOutputType.PDF,
-        storageKey: 'new-output',
-        mimeType: 'application/pdf',
-        size: 100,
-      },
-      update: {
-        generationId: 'generation-id',
         storageKey: 'new-output',
         mimeType: 'application/pdf',
         size: 100,
@@ -202,9 +209,7 @@ describe('ReportGenerationProcessorService', () => {
       },
     });
     expect(consumeInTransaction).toHaveBeenCalledTimes(1);
-    expect(
-      transaction.storageCleanupTask.upsert.mock.invocationCallOrder[0],
-    ).toBeLessThan(transaction.reportOutput.upsert.mock.invocationCallOrder[0]);
+    expect(transaction.reportOutput.create).toHaveBeenCalledTimes(1);
   });
 
   it('marks a first failed generation and releases its reserved credit', async () => {
@@ -393,11 +398,10 @@ describe('ReportGenerationProcessorService', () => {
     const transaction = {
       reportGeneration,
       reportOutput: {
-        findUnique: jest.fn().mockResolvedValue(null),
-        upsert: jest.fn(),
+        create: jest.fn(),
       },
       storageCleanupTask: { upsert: jest.fn() },
-      report: { update: jest.fn() },
+      report: { update: jest.fn(), updateMany: jest.fn() },
     };
     const prisma = {
       reportGeneration,
@@ -633,11 +637,10 @@ function createPersistedResultFixture(uploadObject: jest.Mock): {
   const transaction = {
     reportGeneration,
     reportOutput: {
-      findUnique: jest.fn().mockResolvedValue(null),
-      upsert: jest.fn(),
+      create: jest.fn(),
     },
     storageCleanupTask,
-    report: { update: jest.fn() },
+    report: { update: jest.fn(), updateMany: jest.fn() },
   };
   const prisma = {
     reportGeneration,
