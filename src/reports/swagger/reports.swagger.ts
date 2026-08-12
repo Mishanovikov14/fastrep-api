@@ -70,6 +70,25 @@ export const ApiUpdateReport = () =>
     ApiNotFoundResponse({ description: 'Report not found.' }),
   );
 
+export const ApiDuplicateReport = () =>
+  applyDecorators(
+    authenticatedEndpoint(),
+    ApiOperation({
+      summary: 'Duplicate one completed report',
+      description:
+        'Creates a new editable DRAFT and physically copies each READY asset to an independent private storage key. Generation history and output are not copied.',
+    }),
+    ApiCreatedResponse({
+      description: 'Independent DRAFT report created successfully.',
+      type: ReportResponseDto,
+    }),
+    ApiConflictResponse({
+      description:
+        'REPORT_NOT_DUPLICABLE: only a READY report can be duplicated.',
+    }),
+    ApiNotFoundResponse({ description: 'Report not found.' }),
+  );
+
 export const ApiDeleteReport = () =>
   applyDecorators(
     authenticatedEndpoint(),

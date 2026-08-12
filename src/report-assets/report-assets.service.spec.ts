@@ -1,5 +1,9 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
 import {
   ReportAsset,
   ReportAssetStatus,
@@ -237,6 +241,34 @@ describe('ReportAssetsService', () => {
           position: 0,
         }),
       });
+    });
+
+    it('allows asset upload requests for FAILED reports', async () => {
+      reportDelegate.findFirst.mockResolvedValue({
+        id: 'report-id',
+        status: ReportStatus.FAILED,
+      });
+      assetDelegate.findMany.mockResolvedValue([]);
+
+      await expect(
+        service.requestUpload('user-id', 'report-id', request),
+      ).resolves.toMatchObject({ assetId: expect.any(String) });
+      expect(assetDelegate.create).toHaveBeenCalled();
+    });
+
+    it.each([
+      [ReportStatus.QUEUED, 'REPORT_GENERATION_ACTIVE'],
+      [ReportStatus.PROCESSING, 'REPORT_GENERATION_ACTIVE'],
+      [ReportStatus.READY, 'REPORT_NOT_EDITABLE'],
+    ])('blocks asset upload requests for %s reports', async (status, code) => {
+      reportDelegate.findFirst.mockResolvedValue({ id: 'report-id', status });
+
+      const promise = service.requestUpload('user-id', 'report-id', request);
+
+      await expect(promise).rejects.toBeInstanceOf(ConflictException);
+      await expect(promise).rejects.toMatchObject({ response: { code } });
+      expect(storage.createPresignedUpload).not.toHaveBeenCalled();
+      expect(assetDelegate.create).not.toHaveBeenCalled();
     });
 
     it('uses an opaque server-generated key that filename traversal cannot influence', async () => {
@@ -640,6 +672,15 @@ describe('ReportAssetsService', () => {
     expect(storage.createPresignedGet).not.toHaveBeenCalled();
   });
 
+  it('does not issue a download URL for another user’s asset', async () => {
+    assetDelegate.findFirst.mockResolvedValue(null);
+
+    await expect(
+      service.createDownloadUrl('user-id', 'report-id', 'foreign-asset'),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(storage.createPresignedGet).not.toHaveBeenCalled();
+  });
+
   it('deletes asset metadata and dispatches durable object cleanup', async () => {
     const asset = createAsset({ status: ReportAssetStatus.READY });
     assetDelegate.findFirst.mockResolvedValue(asset);
@@ -693,18 +734,30 @@ describe('ReportAssetsService', () => {
     expect(assetDelegate.deleteMany).not.toHaveBeenCalled();
   });
 
-  it('rejects asset deletion while report generation is processing', async () => {
-    reportDelegate.findFirst.mockResolvedValue({
-      id: 'report-id',
-      status: ReportStatus.PROCESSING,
-    });
+  it.each([
+    [ReportStatus.QUEUED, 'REPORT_GENERATION_ACTIVE'],
+    [ReportStatus.PROCESSING, 'REPORT_GENERATION_ACTIVE'],
+    [ReportStatus.READY, 'REPORT_NOT_EDITABLE'],
+  ])('rejects asset deletion for %s reports', async (status, code) => {
+    reportDelegate.findFirst.mockResolvedValue({ id: 'report-id', status });
 
     await expect(
       service.delete('user-id', 'report-id', 'asset-id'),
-    ).rejects.toMatchObject({
-      response: expect.objectContaining({ code: 'REPORT_NOT_EDITABLE' }),
-    });
+    ).rejects.toMatchObject({ response: expect.objectContaining({ code }) });
     expect(assetDelegate.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('allows asset deletion for FAILED reports', async () => {
+    reportDelegate.findFirst.mockResolvedValue({
+      id: 'report-id',
+      status: ReportStatus.FAILED,
+    });
+    assetDelegate.findFirst.mockResolvedValue(createAsset());
+
+    await expect(
+      service.delete('user-id', 'report-id', 'asset-id'),
+    ).resolves.toBeUndefined();
+    expect(assetDelegate.deleteMany).toHaveBeenCalled();
   });
 
   it('still returns 404 for an asset belonging to another report', async () => {
