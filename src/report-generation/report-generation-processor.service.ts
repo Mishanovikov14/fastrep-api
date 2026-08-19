@@ -32,11 +32,17 @@ import {
 import { PdfImage, PdfReportService } from './pdf-report.service';
 import { ProviderAttemptsService } from './provider-attempts.service';
 
-const REPORT_INSTRUCTIONS = `Create a professional report in the requested language using only the supplied source content.
-Never invent names, dates, quantities, events, observations, or conclusions.
-Explicitly state when relevant information is unknown.
-Clearly distinguish source observations from recommendations.
-Reference images only through the aliases supplied alongside image inputs.
+export const REPORT_INSTRUCTIONS = `Create a concise, professional report in the requested language using only the supplied source content.
+Never invent names, dates, quantities, events, observations, conclusions, or relationships between sources.
+Treat every attached PDF, document, photograph, and audio recording as an independent source unless its contents provide direct evidence connecting it to another source.
+Never claim that one attachment confirms another merely because both were uploaded to the same report. If sources appear unrelated, describe them separately and state that no relationship can be established from the supplied information.
+State uncertainty and material limitations explicitly instead of guessing.
+Clearly distinguish facts and direct observations from inferences and recommendations. Never phrase an inference or recommendation as an observed fact.
+Use natural source terminology such as "attached PDF", "attached document", "photograph", or "audio recording" according to the actual source type.
+Use image aliases only in imageAssetIds. Never include IMAGE_N aliases, asset IDs, report IDs, generation IDs, storage keys, or URLs in titles, prose, bullets, captions, conclusions, or recommendations.
+Write natural customer-facing prose without technical image numbering.
+Adapt the structure to the useful available content. Prefer an executive summary, detailed findings or source details, recommendations, and limitations when those sections contain meaningful information; omit empty or unsupported sections.
+Do not repeat the same fact across sections unless necessary. Keep the executive summary high-level, place evidence and detail in findings, and keep recommendations action-oriented.
 Use neutral wording and do not depend on Markdown formatting.`;
 
 const SUPPORTED_IMAGE_MIME_TYPES = new Set([
@@ -345,6 +351,7 @@ export class ReportGenerationProcessorService {
         pdfImages,
         generatedAt,
         snapshot.report.language,
+        snapshot.report.title,
       );
       await this.assertOwnership(generationId, processingToken);
 
@@ -828,18 +835,35 @@ export class ReportGenerationProcessorService {
     snapshot: GenerationInputSnapshot,
     transcripts: Array<{ assetId: string; text: string }>,
   ): string {
+    const sourceCounts = new Map<ReportAssetType, number>();
     return JSON.stringify({
       requestedLanguage: snapshot.report.language,
       title: snapshot.report.title,
       notes: snapshot.report.notes,
-      assetManifest: snapshot.assets.map((asset) => ({
-        ...(asset.type === ReportAssetType.IMAGE ? {} : { id: asset.id }),
-        type: asset.type,
-        mimeType: asset.verifiedMimeType,
-        position: asset.position,
+      assetManifest: snapshot.assets.map((asset) => {
+        const sourceNumber = (sourceCounts.get(asset.type) ?? 0) + 1;
+        sourceCounts.set(asset.type, sourceNumber);
+        return {
+          source: `${this.sourceTypeLabel(asset.type)} ${sourceNumber}`,
+          type: asset.type,
+          mimeType: asset.verifiedMimeType,
+          position: asset.position,
+        };
+      }),
+      audioTranscripts: transcripts.map((transcript, index) => ({
+        source: `audio recording ${index + 1}`,
+        text: transcript.text,
       })),
-      audioTranscripts: transcripts,
     });
+  }
+
+  private sourceTypeLabel(type: ReportAssetType): string {
+    const labels: Record<ReportAssetType, string> = {
+      [ReportAssetType.IMAGE]: 'photograph',
+      [ReportAssetType.DOCUMENT]: 'attached document',
+      [ReportAssetType.AUDIO]: 'audio recording',
+    };
+    return labels[type];
   }
 
   private validateImageReferences(

@@ -14,18 +14,38 @@ import { StorageCleanupService } from '../storage/storage-cleanup.service';
 import { AssetTranscriptionsService } from './asset-transcriptions.service';
 import { PdfReportService } from './pdf-report.service';
 import { ProviderAttemptsService } from './provider-attempts.service';
-import { ReportGenerationProcessorService } from './report-generation-processor.service';
+import {
+  REPORT_INSTRUCTIONS,
+  ReportGenerationProcessorService,
+} from './report-generation-processor.service';
 
 describe('ReportGenerationProcessorService', () => {
+  it('forbids invented source relationships, alias leakage, and repetition', () => {
+    expect(REPORT_INSTRUCTIONS).toContain(
+      'Never claim that one attachment confirms another',
+    );
+    expect(REPORT_INSTRUCTIONS).toContain('relationships between sources');
+    expect(REPORT_INSTRUCTIONS).toContain('Never include IMAGE_N aliases');
+    expect(REPORT_INSTRUCTIONS).toContain(
+      'Do not repeat the same fact across sections',
+    );
+    expect(REPORT_INSTRUCTIONS).toContain(
+      'attached PDF", "attached document", "photograph", or "audio recording',
+    );
+  });
+
   it('omits raw image asset IDs from provider source text', () => {
     const service = createProcessor({} as PrismaService);
     const imageId = '11111111-1111-4111-8111-111111111111';
+    const documentId = '22222222-2222-4222-8222-222222222222';
+    const audioId = '33333333-3333-4333-8333-333333333333';
+    const reportId = '44444444-4444-4444-8444-444444444444';
 
     const sourceText = service['buildSourceText'](
       {
         version: 1,
         report: {
-          id: 'report-id',
+          id: reportId,
           title: 'Inspection',
           notes: 'Notes',
           language: 'en',
@@ -40,14 +60,38 @@ describe('ReportGenerationProcessorService', () => {
             storageKey: 'private-key',
             originalFileName: 'image.jpg',
           },
+          {
+            id: documentId,
+            type: ReportAssetType.DOCUMENT,
+            verifiedMimeType: 'application/pdf',
+            verifiedSize: 100,
+            position: 1,
+            storageKey: 'private-document-key',
+            originalFileName: 'proposal.pdf',
+          },
+          {
+            id: audioId,
+            type: ReportAssetType.AUDIO,
+            verifiedMimeType: 'audio/mpeg',
+            verifiedSize: 100,
+            position: 2,
+            storageKey: 'private-audio-key',
+            originalFileName: 'notes.mp3',
+          },
         ],
         createdAt: '2026-08-19T00:00:00.000Z',
       },
-      [],
+      [{ assetId: audioId, text: 'Spoken inspection notes.' }],
     );
 
     expect(sourceText).not.toContain(imageId);
+    expect(sourceText).not.toContain(documentId);
+    expect(sourceText).not.toContain(audioId);
+    expect(sourceText).not.toContain(reportId);
     expect(sourceText).toContain('image/jpeg');
+    expect(sourceText).toContain('attached document 1');
+    expect(sourceText).toContain('audio recording 1');
+    expect(sourceText).toContain('Spoken inspection notes.');
   });
 
   it('defers a duplicate delivery while another worker lease is live', async () => {
@@ -480,6 +524,13 @@ describe('ReportGenerationProcessorService', () => {
     await service.process('generation-id', 2, 2);
 
     expect(provider.generateReport).not.toHaveBeenCalled();
+    expect(pdf.generate).toHaveBeenCalledWith(
+      structuredResult,
+      [],
+      expect.any(Date),
+      'en',
+      'Inspection',
+    );
     expect(storage.uploadObject).toHaveBeenCalledTimes(1);
     expect(credits.consumeInTransaction).toHaveBeenCalledTimes(1);
   });

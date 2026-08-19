@@ -210,13 +210,23 @@ export class ObjectStorageService {
   ): Promise<PresignedDownloadContract> {
     this.ensureConfigured();
     const expiresAt = new Date(Date.now() + this.downloadUrlTtlSeconds * 1000);
-    const safeFileName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const safeFileName = fileName
+      .normalize('NFKC')
+      .replace(/[\u0000-\u001f\u007f"\\/;]+/g, '_');
+    const asciiFallback = safeFileName
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-zA-Z0-9._-]/g, '_');
+    const encodedFileName = encodeURIComponent(safeFileName).replace(
+      /['()]/g,
+      (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+    );
     const url = await getSignedUrl(
       this.client,
       new GetObjectCommand({
         Bucket: this.bucket,
         Key: storageKey,
-        ResponseContentDisposition: `attachment; filename="${safeFileName}"`,
+        ResponseContentDisposition: `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodedFileName}`,
         ResponseContentType: 'application/pdf',
       }),
       { expiresIn: this.downloadUrlTtlSeconds },
