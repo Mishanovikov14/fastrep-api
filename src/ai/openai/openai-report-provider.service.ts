@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI, { toStreamingFile } from 'openai';
 import { zodTextFormat } from 'openai/helpers/zod';
@@ -12,8 +12,12 @@ import {
 import { ReportResult, reportResultSchema } from '../report-result.schema';
 import { OpenAiClientService } from './openai-client.service';
 
+export const OPENAI_MODERATION_MODEL = 'omni-moderation-latest';
+export const OPENAI_MODERATION_MAX_IMAGES_PER_REQUEST = 1;
+
 @Injectable()
 export class OpenAiReportProviderService implements AiProvider {
+  private readonly logger = new Logger(OpenAiReportProviderService.name);
   private readonly reportModel: string;
   private readonly transcriptionModel: string;
   private readonly fileTtlSeconds: number;
@@ -37,30 +41,114 @@ export class OpenAiReportProviderService implements AiProvider {
     imageUrls: string[],
     signal?: AbortSignal,
   ): Promise<ProviderResult<{ flagged: boolean }>> {
-    try {
-      const input: OpenAI.Moderations.ModerationMultiModalInput[] = [];
-      if (text.trim()) {
-        input.push({ type: 'text', text });
+    const trimmedText = text.trim();
+    let providerRequestId: string | undefined;
+
+    if (trimmedText) {
+      const result = await this.moderateInput(
+        [{ type: 'text', text: trimmedText }],
+        {
+          batchCount: 1,
+          batchIndex: 1,
+          imageCount: 0,
+          inputType: 'text',
+        },
+        signal,
+      );
+      providerRequestId = result.providerRequestId;
+      if (result.flagged) {
+        return { value: { flagged: true }, providerRequestId };
       }
-      input.push(
-        ...imageUrls.map((url) => ({
+    }
+
+    const batchCount = Math.ceil(
+      imageUrls.length / OPENAI_MODERATION_MAX_IMAGES_PER_REQUEST,
+    );
+    for (let batchIndex = 0; batchIndex < batchCount; batchIndex += 1) {
+      const batch = imageUrls.slice(
+        batchIndex * OPENAI_MODERATION_MAX_IMAGES_PER_REQUEST,
+        (batchIndex + 1) * OPENAI_MODERATION_MAX_IMAGES_PER_REQUEST,
+      );
+      const result = await this.moderateInput(
+        batch.map((url) => ({
           type: 'image_url' as const,
           image_url: { url },
         })),
+        {
+          batchCount,
+          batchIndex: batchIndex + 1,
+          imageCount: batch.length,
+          inputType: 'image',
+        },
+        signal,
       );
-      if (input.length === 0) {
-        return { value: { flagged: false } };
+      providerRequestId = result.providerRequestId ?? providerRequestId;
+      if (result.flagged) {
+        return { value: { flagged: true }, providerRequestId };
       }
+    }
+
+    return { value: { flagged: false }, providerRequestId };
+  }
+
+  private async moderateInput(
+    input: OpenAI.Moderations.ModerationMultiModalInput[],
+    metadata: {
+      batchCount: number;
+      batchIndex: number;
+      imageCount: number;
+      inputType: 'image' | 'text';
+    },
+    signal?: AbortSignal,
+  ): Promise<{ flagged: boolean; providerRequestId?: string }> {
+    this.logger.log({
+      event: 'openai_moderation_batch_started',
+      operation: 'moderation',
+      model: OPENAI_MODERATION_MODEL,
+      ...metadata,
+    });
+    try {
       const { data, request_id } = await this.openAi.client.moderations
-        .create({ model: 'omni-moderation-latest', input }, { signal })
+        .create({ model: OPENAI_MODERATION_MODEL, input }, { signal })
         .withResponse();
-      return {
-        value: { flagged: data.results.some((result) => result.flagged) },
-        providerRequestId: request_id ?? undefined,
-      };
+      const flagged = data.results.some((result) => result.flagged);
+      this.logger.log({
+        event: 'openai_moderation_batch_completed',
+        operation: 'moderation',
+        model: OPENAI_MODERATION_MODEL,
+        providerStatus: 'completed',
+        flagged,
+        ...metadata,
+      });
+      return { flagged, providerRequestId: request_id ?? undefined };
     } catch (error: unknown) {
+      const providerDiagnostic = this.moderationProviderDiagnostic(error);
+      this.logger.warn({
+        event: 'openai_moderation_batch_failed',
+        operation: 'moderation',
+        model: OPENAI_MODERATION_MODEL,
+        ...providerDiagnostic,
+        ...metadata,
+      });
       throw this.providerError(error, 'AI_UNAVAILABLE');
     }
+  }
+
+  private moderationProviderDiagnostic(error: unknown): {
+    providerErrorCode?: string;
+    providerStatus?: number;
+  } {
+    if (!(error instanceof OpenAI.APIError)) {
+      return {};
+    }
+    const providerErrorCode = (error as { code?: unknown }).code;
+    const providerStatus = (error as { status?: unknown }).status;
+    return {
+      providerErrorCode:
+        typeof providerErrorCode === 'string' ? providerErrorCode : undefined,
+      providerStatus:
+        typeof providerStatus === 'number' ? providerStatus : undefined,
+    };
   }
 
   async transcribe(
