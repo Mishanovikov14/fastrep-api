@@ -39,6 +39,12 @@ Clearly distinguish source observations from recommendations.
 Reference only image asset IDs supplied in the source manifest.
 Use neutral wording and do not depend on Markdown formatting.`;
 
+const SUPPORTED_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]);
+
 @Injectable()
 export class ReportGenerationProcessorService {
   private readonly logger = new Logger(ReportGenerationProcessorService.name);
@@ -165,6 +171,7 @@ export class ReportGenerationProcessorService {
       const imageAssets = snapshot.assets.filter(
         (asset) => asset.type === ReportAssetType.IMAGE,
       );
+      this.assertSupportedImageMimeTypes(imageAssets);
       this.assertBeforeDeadline(deadline);
       const moderationImageInputs = await Promise.all(
         imageAssets.map(async (asset) => ({
@@ -260,11 +267,17 @@ export class ReportGenerationProcessorService {
         try {
           this.assertBeforeDeadline(deadline);
           const reportImageInputs = await Promise.all(
-            imageAssets.map(async (asset) => ({
-              assetId: asset.id,
-              url: (await this.storage.createPresignedGet(asset.storageKey))
-                .url,
-            })),
+            imageAssets.map(async (asset) => {
+              const reference = await this.storage.createPresignedGet(
+                asset.storageKey,
+              );
+              return {
+                assetId: asset.id,
+                url: reference.url,
+                mimeType: asset.verifiedMimeType,
+                referenceExpiresAt: reference.expiresAt,
+              };
+            }),
           );
           const result = await this.provider.generateReport(
             {
@@ -840,8 +853,29 @@ export class ReportGenerationProcessorService {
     if (invalid) {
       throw new AiProviderError(
         'AI_INVALID_IMAGE_REFERENCE',
-        true,
+        false,
         'AI response referenced an unavailable image',
+      );
+    }
+  }
+
+  private assertSupportedImageMimeTypes(
+    images: GenerationSnapshotAsset[],
+  ): void {
+    const invalidImageIndex = images.findIndex(
+      (image) => !SUPPORTED_IMAGE_MIME_TYPES.has(image.verifiedMimeType),
+    );
+    if (invalidImageIndex >= 0) {
+      throw new AiProviderError(
+        'AI_UNSUPPORTED_IMAGE_MIME',
+        false,
+        'A report image has an unsupported format',
+        undefined,
+        {
+          invalidImageAssetId: images[invalidImageIndex].id,
+          invalidImageIndex,
+          invalidImageMimeType: images[invalidImageIndex].verifiedMimeType,
+        },
       );
     }
   }

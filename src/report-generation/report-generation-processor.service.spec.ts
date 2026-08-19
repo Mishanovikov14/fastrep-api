@@ -212,7 +212,7 @@ describe('ReportGenerationProcessorService', () => {
     expect(transaction.reportOutput.create).toHaveBeenCalledTimes(1);
   });
 
-  it('marks a first failed generation and releases its reserved credit', async () => {
+  it('releases reserved credit for a permanent invalid image reference', async () => {
     const now = new Date('2026-07-30T12:00:00.000Z');
     jest.useFakeTimers().setSystemTime(now);
     const fixture = createFailureFixture({
@@ -226,8 +226,8 @@ describe('ReportGenerationProcessorService', () => {
       fixture.service['failGeneration'](
         'generation-id',
         'worker-token',
-        'AI_UNAVAILABLE',
-        'AI provider request failed',
+        'AI_INVALID_IMAGE_REFERENCE',
+        'AI response referenced an unavailable image',
       ),
     ).resolves.toBe(true);
 
