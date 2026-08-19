@@ -36,7 +36,7 @@ const REPORT_INSTRUCTIONS = `Create a professional report in the requested langu
 Never invent names, dates, quantities, events, observations, or conclusions.
 Explicitly state when relevant information is unknown.
 Clearly distinguish source observations from recommendations.
-Reference only image asset IDs supplied in the source manifest.
+Reference images only through the aliases supplied alongside image inputs.
 Use neutral wording and do not depend on Markdown formatting.`;
 
 const SUPPORTED_IMAGE_MIME_TYPES = new Set([
@@ -833,7 +833,7 @@ export class ReportGenerationProcessorService {
       title: snapshot.report.title,
       notes: snapshot.report.notes,
       assetManifest: snapshot.assets.map((asset) => ({
-        id: asset.id,
+        ...(asset.type === ReportAssetType.IMAGE ? {} : { id: asset.id }),
         type: asset.type,
         mimeType: asset.verifiedMimeType,
         position: asset.position,
