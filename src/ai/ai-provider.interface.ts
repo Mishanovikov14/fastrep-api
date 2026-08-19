@@ -72,8 +72,10 @@ export type AiProviderDiagnostics = {
   providerCode?: string;
   providerType?: string;
   invalidImageAssetId?: string;
+  invalidImageAlias?: string;
   invalidImageIndex?: number;
   invalidImageMimeType?: string;
+  invalidReferenceIndex?: number;
 };
 
 export class AiProviderError extends Error {

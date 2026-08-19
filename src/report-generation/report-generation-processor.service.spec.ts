@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import {
+  ReportAssetType,
   ReportGenerationStatus,
   ReportOutputType,
   ReportStatus,
@@ -16,6 +17,39 @@ import { ProviderAttemptsService } from './provider-attempts.service';
 import { ReportGenerationProcessorService } from './report-generation-processor.service';
 
 describe('ReportGenerationProcessorService', () => {
+  it('omits raw image asset IDs from provider source text', () => {
+    const service = createProcessor({} as PrismaService);
+    const imageId = '11111111-1111-4111-8111-111111111111';
+
+    const sourceText = service['buildSourceText'](
+      {
+        version: 1,
+        report: {
+          id: 'report-id',
+          title: 'Inspection',
+          notes: 'Notes',
+          language: 'en',
+        },
+        assets: [
+          {
+            id: imageId,
+            type: ReportAssetType.IMAGE,
+            verifiedMimeType: 'image/jpeg',
+            verifiedSize: 100,
+            position: 0,
+            storageKey: 'private-key',
+            originalFileName: 'image.jpg',
+          },
+        ],
+        createdAt: '2026-08-19T00:00:00.000Z',
+      },
+      [],
+    );
+
+    expect(sourceText).not.toContain(imageId);
+    expect(sourceText).toContain('image/jpeg');
+  });
+
   it('defers a duplicate delivery while another worker lease is live', async () => {
     const findUniqueOrThrow = jest.fn();
     const leaseExpiration = new Date(Date.now() + 60_000);

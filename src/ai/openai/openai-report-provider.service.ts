@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI, { toStreamingFile } from 'openai';
 import { zodTextFormat } from 'openai/helpers/zod';
+import { z } from 'zod';
 import {
   AiProvider,
   AiProviderError,
@@ -27,6 +28,23 @@ type ResponseGenerationMetadata = {
   documentCount: number;
   imageCount: number;
   referenceStrategy: 'none' | 'presigned_s3';
+};
+
+type ProviderImageInputWithAlias = ProviderReportRequest['images'][number] & {
+  alias: string;
+};
+
+const providerReportResultBaseSchema = reportResultSchema.omit({
+  sections: true,
+});
+const providerSectionBaseSchema =
+  reportResultSchema.shape.sections.element.omit({ imageAssetIds: true });
+type ProviderReportResult = Omit<ReportResult, 'sections'> & {
+  sections: Array<
+    Omit<ReportResult['sections'][number], 'imageAssetIds'> & {
+      imageRefs: string[];
+    }
+  >;
 };
 
 export const OPENAI_MODERATION_MODEL = 'omni-moderation-latest';
@@ -239,34 +257,31 @@ export class OpenAiReportProviderService implements AiProvider {
     this.logStarted('response_generation', this.reportModel, metadata);
     try {
       this.validateImageInputs(request.images);
+      const images = request.images.map((image, index) => ({
+        ...image,
+        alias: `IMAGE_${index + 1}`,
+      }));
+      const responseSchema = this.responseSchema(
+        images.map(({ alias }) => alias),
+      );
       const content: OpenAI.Responses.ResponseInputContent[] = [
         { type: 'input_text', text: request.sourceText },
-        ...request.images.flatMap(
-          (image): OpenAI.Responses.ResponseInputContent[] => [
-            {
-              type: 'input_text',
-              text: `The next image has asset ID ${image.assetId}. Use exactly this asset ID when referencing the image in imageAssetIds.`,
-            },
-            {
-              type: 'input_image',
-              detail: 'low',
-              image_url: image.url,
-            },
-          ],
-        ),
-        ...request.documents.flatMap(
-          (document): OpenAI.Responses.ResponseInputContent[] => [
-            {
-              type: 'input_text',
-              text: `The next document has asset ID ${document.assetId}.`,
-            },
-            {
-              type: 'input_file',
-              file_id: document.fileId,
-              detail: 'low',
-            },
-          ],
-        ),
+        ...images.flatMap((image): OpenAI.Responses.ResponseInputContent[] => [
+          {
+            type: 'input_text',
+            text: `The next image is ${image.alias}. Use this alias in imageRefs when referencing the image.`,
+          },
+          {
+            type: 'input_image',
+            detail: 'low',
+            image_url: image.url,
+          },
+        ]),
+        ...request.documents.map((document) => ({
+          type: 'input_file' as const,
+          file_id: document.fileId,
+          detail: 'low' as const,
+        })),
       ];
       const { data, request_id } = await this.openAi.client.responses
         .parse(
@@ -278,7 +293,7 @@ export class OpenAiReportProviderService implements AiProvider {
             safety_identifier: request.safetyIdentifier,
             store: false,
             text: {
-              format: zodTextFormat(reportResultSchema, 'fastrep_report_v1'),
+              format: zodTextFormat(responseSchema, 'fastrep_report_v2'),
             },
           },
           { signal },
@@ -292,12 +307,29 @@ export class OpenAiReportProviderService implements AiProvider {
           request_id ?? undefined,
         );
       }
-      const value = reportResultSchema.parse(data.output_parsed);
-      this.validateImageReferences(
-        value,
-        request.images.map(({ assetId }) => assetId),
+      const parsed = responseSchema.safeParse(data.output_parsed);
+      if (!parsed.success) {
+        throw this.invalidProviderImageReference(
+          data.output_parsed,
+          images.map(({ alias }) => alias),
+          request_id ?? undefined,
+        );
+      }
+      const value = this.mapImageAliases(
+        parsed.data,
+        images,
         request_id ?? undefined,
       );
+      this.logger.log({
+        event: 'ai_provider_response_mapped',
+        provider: 'openai',
+        operation: 'response_generation',
+        model: this.reportModel,
+        imageCount: images.length,
+        referencedImageCount: new Set(
+          value.sections.flatMap((section) => section.imageAssetIds),
+        ).size,
+      });
       return {
         value,
         providerRequestId: request_id ?? undefined,
@@ -372,27 +404,109 @@ export class OpenAiReportProviderService implements AiProvider {
     }
   }
 
-  private validateImageReferences(
-    result: ReportResult,
-    assetIds: string[],
+  private responseSchema(aliases: string[]): z.ZodType<ProviderReportResult> {
+    const imageRefs =
+      aliases.length > 0
+        ? z.array(z.enum(aliases as [string, ...string[]])).max(20)
+        : z.array(z.string()).max(0);
+    return providerReportResultBaseSchema.extend({
+      sections: z
+        .array(providerSectionBaseSchema.extend({ imageRefs }))
+        .min(1)
+        .max(30),
+    });
+  }
+
+  private mapImageAliases(
+    result: ProviderReportResult,
+    images: ProviderImageInputWithAlias[],
     providerRequestId?: string,
-  ): void {
-    const allowedIds = new Set(assetIds);
-    const references = result.sections.flatMap(
-      (section) => section.imageAssetIds,
+  ): ReportResult {
+    const assetIdByAlias = new Map(
+      images.map(({ alias, assetId }) => [alias, assetId]),
     );
-    const invalidImageIndex = references.findIndex(
-      (assetId) => !allowedIds.has(assetId),
+    return reportResultSchema.parse({
+      ...result,
+      sections: result.sections.map(({ imageRefs, ...section }) => {
+        const seen = new Set<string>();
+        const imageAssetIds = imageRefs.flatMap((alias, referenceIndex) => {
+          const assetId = assetIdByAlias.get(alias);
+          if (!assetId) {
+            throw new AiProviderError(
+              'AI_INVALID_IMAGE_REFERENCE',
+              false,
+              'AI response referenced an unavailable image',
+              providerRequestId,
+              {
+                invalidImageAlias: alias,
+                invalidReferenceIndex: referenceIndex,
+              },
+            );
+          }
+          if (seen.has(assetId)) {
+            return [];
+          }
+          seen.add(assetId);
+          return [assetId];
+        });
+        return { ...section, imageAssetIds };
+      }),
+    });
+  }
+
+  private invalidProviderImageReference(
+    result: unknown,
+    aliases: string[],
+    providerRequestId?: string,
+  ): AiProviderError {
+    const allowedAliases = new Set(aliases);
+    const references = this.providerImageReferences(result);
+    const invalidReferenceIndex = references.findIndex(
+      (alias) => !allowedAliases.has(alias),
     );
-    if (invalidImageIndex >= 0) {
-      throw new AiProviderError(
-        'AI_INVALID_IMAGE_REFERENCE',
+    if (invalidReferenceIndex < 0) {
+      return new AiProviderError(
+        'AI_INVALID_RESPONSE',
         false,
-        'AI response referenced an unavailable image',
+        'AI provider response did not match the required schema',
         providerRequestId,
-        { invalidImageIndex },
       );
     }
+    return new AiProviderError(
+      'AI_INVALID_IMAGE_REFERENCE',
+      false,
+      'AI response referenced an unavailable image',
+      providerRequestId,
+      {
+        invalidImageAlias: references[invalidReferenceIndex],
+        invalidReferenceIndex,
+      },
+    );
+  }
+
+  private providerImageReferences(result: unknown): string[] {
+    if (!result || typeof result !== 'object' || !('sections' in result)) {
+      return [];
+    }
+    const sections = (result as { sections?: unknown }).sections;
+    if (!Array.isArray(sections)) {
+      return [];
+    }
+    return sections.flatMap((section) => {
+      if (
+        !section ||
+        typeof section !== 'object' ||
+        !('imageRefs' in section)
+      ) {
+        return [];
+      }
+      const imageRefs = (section as { imageRefs?: unknown }).imageRefs;
+      return Array.isArray(imageRefs)
+        ? imageRefs.filter(
+            (value): value is string => typeof value === 'string',
+          )
+        : [];
+    });
   }
 
   private providerError(
@@ -402,7 +516,15 @@ export class OpenAiReportProviderService implements AiProvider {
     metadata?: ModerationBatchMetadata | ResponseGenerationMetadata,
   ): AiProviderError {
     const providerError =
-      error instanceof AiProviderError ? error : mapOpenAiProviderError(error);
+      error instanceof AiProviderError
+        ? error
+        : error instanceof z.ZodError
+          ? new AiProviderError(
+              'AI_INVALID_RESPONSE',
+              false,
+              'AI provider response did not match the required schema',
+            )
+          : mapOpenAiProviderError(error);
     this.logger.error({
       event: 'ai_provider_request_failed',
       provider: 'openai',
@@ -415,8 +537,10 @@ export class OpenAiReportProviderService implements AiProvider {
       retryable: providerError.retryable,
       mappedErrorCode: providerError.code,
       invalidImageAssetId: providerError.diagnostics.invalidImageAssetId,
+      invalidImageAlias: providerError.diagnostics.invalidImageAlias,
       invalidImageIndex: providerError.diagnostics.invalidImageIndex,
       invalidImageMimeType: providerError.diagnostics.invalidImageMimeType,
+      invalidReferenceIndex: providerError.diagnostics.invalidReferenceIndex,
       ...metadata,
     });
     return providerError;

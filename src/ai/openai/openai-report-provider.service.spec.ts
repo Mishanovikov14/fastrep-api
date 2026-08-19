@@ -255,50 +255,47 @@ const expectImageBatches = (
 };
 
 const IMAGE_ONE_ID = '11111111-1111-4111-8111-111111111111';
-const IMAGE_TWO_ID = '22222222-2222-4222-8222-222222222222';
 const DOCUMENT_ID = '33333333-3333-4333-8333-333333333333';
 const REFERENCE_EXPIRY = new Date('2099-01-01T00:00:00.000Z');
 
 describe('OpenAiReportProviderService response generation', () => {
   it.each([
-    ['one image', [providerImage(IMAGE_ONE_ID)], []],
-    [
-      'multiple images',
-      [providerImage(IMAGE_ONE_ID), providerImage(IMAGE_TWO_ID)],
-      [],
-    ],
+    ['one image', providerImages(1), []],
+    ['multiple images', providerImages(2), []],
     [
       'an image and a PDF',
-      [providerImage(IMAGE_ONE_ID)],
+      providerImages(1),
       [{ assetId: DOCUMENT_ID, fileId: 'file-pdf' }],
     ],
     [
       'an image and an XLSX document',
-      [providerImage(IMAGE_ONE_ID)],
+      providerImages(1),
       [{ assetId: DOCUMENT_ID, fileId: 'file-xlsx' }],
     ],
     [
       'multiple images and a document',
-      [providerImage(IMAGE_ONE_ID), providerImage(IMAGE_TWO_ID)],
+      providerImages(2),
       [{ assetId: DOCUMENT_ID, fileId: 'file-document' }],
     ],
   ])(
     'constructs valid mixed Responses content for %s',
     async (_, images, documents) => {
       const fixture = createGenerationFixture(
-        completedReport(images.map((image) => image.assetId)),
+        completedProviderReport(
+          images.map((__, index) => `IMAGE_${index + 1}`),
+        ),
       );
 
-      await expect(
-        fixture.service.generateReport({
-          instructions: 'instructions',
-          sourceText: 'source text',
-          images,
-          documents,
-          safetyIdentifier: 'safety-id',
-          maxOutputTokens: 1_000,
-        }),
-      ).resolves.toMatchObject({ providerRequestId: 'response-request-id' });
+      const result = await fixture.service.generateReport(
+        reportRequest(images, documents),
+      );
+
+      expect(result).toMatchObject({
+        providerRequestId: 'response-request-id',
+        value: {
+          sections: [{ imageAssetIds: images.map((image) => image.assetId) }],
+        },
+      });
 
       const parseCalls = fixture.parse.mock.calls as unknown as Array<
         [
@@ -316,7 +313,7 @@ describe('OpenAiReportProviderService response generation', () => {
         const offset = 1 + index * 2;
         expect(content[offset]).toEqual({
           type: 'input_text',
-          text: `The next image has asset ID ${image.assetId}. Use exactly this asset ID when referencing the image in imageAssetIds.`,
+          text: `The next image is IMAGE_${index + 1}. Use this alias in imageRefs when referencing the image.`,
         });
         expect(content[offset + 1]).toEqual({
           type: 'input_image',
@@ -325,37 +322,136 @@ describe('OpenAiReportProviderService response generation', () => {
         });
       });
       documents.forEach((document, index) => {
-        const offset = 1 + images.length * 2 + index * 2;
+        const offset = 1 + images.length * 2 + index;
         expect(content[offset]).toEqual({
-          type: 'input_text',
-          text: `The next document has asset ID ${document.assetId}.`,
-        });
-        expect(content[offset + 1]).toEqual({
           type: 'input_file',
           detail: 'low',
           file_id: document.fileId,
         });
       });
+      const modelText = content
+        .filter(
+          (item): item is OpenAI.Responses.ResponseInputText =>
+            item.type === 'input_text',
+        )
+        .map((item) => item.text)
+        .join(' ');
+      images.forEach((image) => {
+        expect(modelText).not.toContain(image.assetId);
+      });
     },
   );
 
-  it('rejects an expired presigned image before calling OpenAI', async () => {
-    const fixture = createGenerationFixture(completedReport([]));
+  it('maps IMAGE_4 to the fourth real asset and constrains the schema', async () => {
+    const images = providerImages(4);
+    const fixture = createGenerationFixture(
+      completedProviderReport(['IMAGE_4']),
+    );
+
+    const result = await fixture.service.generateReport(reportRequest(images));
+
+    expect(result.value.sections[0].imageAssetIds).toEqual([images[3].assetId]);
+    const parseCalls = fixture.parse.mock.calls as unknown as Array<
+      [{ text: { format: unknown } }]
+    >;
+    const serializedFormat = JSON.stringify(parseCalls[0][0].text.format);
+    expect(serializedFormat).toContain(
+      '"enum":["IMAGE_1","IMAGE_2","IMAGE_3","IMAGE_4"]',
+    );
+    expect(serializedFormat).not.toContain('IMAGE_5');
+  });
+
+  it('maps a completed provider response with a request ID instead of throwing the runtime regression error', async () => {
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation();
+    const images = providerImages(2);
+    const fixture = createGenerationFixture(
+      completedProviderReport(['IMAGE_2']),
+    );
+
+    const result = await fixture.service.generateReport(reportRequest(images));
+
+    expect(result).toMatchObject({
+      providerRequestId: 'response-request-id',
+      value: {
+        sections: [{ imageAssetIds: [images[1].assetId] }],
+      },
+    });
+    expect(log).toHaveBeenCalledWith({
+      event: 'ai_provider_response_mapped',
+      provider: 'openai',
+      operation: 'response_generation',
+      model: 'gpt-5-mini',
+      imageCount: 2,
+      referencedImageCount: 1,
+    });
+    log.mockRestore();
+  });
+
+  it('maps references across sections and deduplicates within each section', async () => {
+    const images = providerImages(4);
+    const fixture = createGenerationFixture(
+      completedProviderReport(
+        ['IMAGE_2', 'IMAGE_2', 'IMAGE_1'],
+        [providerSection('Second findings', ['IMAGE_4', 'IMAGE_2'])],
+      ),
+    );
+
+    const result = await fixture.service.generateReport(reportRequest(images));
+
+    expect(
+      result.value.sections.map((section) => section.imageAssetIds),
+    ).toEqual([
+      [images[1].assetId, images[0].assetId],
+      [images[3].assetId, images[1].assetId],
+    ]);
+  });
+
+  it.each([
+    ['unknown alias', 'IMAGE_5'],
+    ['raw UUID', IMAGE_ONE_ID],
+  ])('rejects a provider %s permanently', async (_, invalidReference) => {
+    const fixture = createGenerationFixture(
+      completedProviderReport([invalidReference]),
+    );
 
     await expect(
-      fixture.service.generateReport({
-        instructions: 'instructions',
-        sourceText: 'source text',
-        images: [
+      fixture.service.generateReport(reportRequest(providerImages(4))),
+    ).rejects.toMatchObject({
+      code: 'AI_INVALID_IMAGE_REFERENCE',
+      retryable: false,
+      providerRequestId: 'response-request-id',
+      diagnostics: {
+        invalidImageAlias: invalidReference,
+        invalidReferenceIndex: 0,
+      },
+    });
+    expect(fixture.parse).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([0, 1, 20])('supports %s image aliases', async (imageCount) => {
+    const images = providerImages(imageCount);
+    const refs = imageCount > 0 ? [`IMAGE_${imageCount}`] : [];
+    const fixture = createGenerationFixture(completedProviderReport(refs));
+
+    const result = await fixture.service.generateReport(reportRequest(images));
+
+    expect(result.value.sections[0].imageAssetIds).toEqual(
+      imageCount > 0 ? [images[imageCount - 1].assetId] : [],
+    );
+  });
+
+  it('rejects an expired presigned image before calling OpenAI', async () => {
+    const fixture = createGenerationFixture(completedProviderReport([]));
+
+    await expect(
+      fixture.service.generateReport(
+        reportRequest([
           {
             ...providerImage(IMAGE_ONE_ID),
             referenceExpiresAt: new Date('2000-01-01T00:00:00.000Z'),
           },
-        ],
-        documents: [],
-        safetyIdentifier: 'safety-id',
-        maxOutputTokens: 1_000,
-      }),
+        ]),
+      ),
     ).rejects.toMatchObject({
       code: 'AI_INVALID_IMAGE_REFERENCE',
       retryable: false,
@@ -365,17 +461,14 @@ describe('OpenAiReportProviderService response generation', () => {
   });
 
   it('rejects unsupported image MIME before calling OpenAI', async () => {
-    const fixture = createGenerationFixture(completedReport([]));
+    const fixture = createGenerationFixture(completedProviderReport([]));
 
     await expect(
-      fixture.service.generateReport({
-        instructions: 'instructions',
-        sourceText: 'source text',
-        images: [{ ...providerImage(IMAGE_ONE_ID), mimeType: 'image/heic' }],
-        documents: [],
-        safetyIdentifier: 'safety-id',
-        maxOutputTokens: 1_000,
-      }),
+      fixture.service.generateReport(
+        reportRequest([
+          { ...providerImage(IMAGE_ONE_ID), mimeType: 'image/heic' },
+        ]),
+      ),
     ).rejects.toMatchObject({
       code: 'AI_UNSUPPORTED_IMAGE_MIME',
       retryable: false,
@@ -384,42 +477,16 @@ describe('OpenAiReportProviderService response generation', () => {
     expect(fixture.parse).not.toHaveBeenCalled();
   });
 
-  it('makes one provider call and rejects an unknown returned image ID permanently', async () => {
-    const fixture = createGenerationFixture(completedReport([IMAGE_TWO_ID]));
-
-    await expect(
-      fixture.service.generateReport({
-        instructions: 'instructions',
-        sourceText: 'source text',
-        images: [providerImage(IMAGE_ONE_ID)],
-        documents: [],
-        safetyIdentifier: 'safety-id',
-        maxOutputTokens: 1_000,
-      }),
-    ).rejects.toMatchObject({
-      code: 'AI_INVALID_IMAGE_REFERENCE',
-      retryable: false,
-      providerRequestId: 'response-request-id',
-      diagnostics: { invalidImageIndex: 0 },
-    });
-    expect(fixture.parse).toHaveBeenCalledTimes(1);
-  });
-
-  it('logs an invalid returned image index without logging its signed URL', async () => {
+  it('logs an invalid alias without logging its signed URL', async () => {
     const started = jest.spyOn(Logger.prototype, 'log').mockImplementation();
     const failed = jest.spyOn(Logger.prototype, 'error').mockImplementation();
-    const fixture = createGenerationFixture(completedReport([IMAGE_TWO_ID]));
+    const fixture = createGenerationFixture(
+      completedProviderReport(['IMAGE_5']),
+    );
     const image = providerImage(IMAGE_ONE_ID);
 
     await expect(
-      fixture.service.generateReport({
-        instructions: 'instructions',
-        sourceText: 'source text',
-        images: [image],
-        documents: [],
-        safetyIdentifier: 'safety-id',
-        maxOutputTokens: 1_000,
-      }),
+      fixture.service.generateReport(reportRequest([image])),
     ).rejects.toMatchObject({ code: 'AI_INVALID_IMAGE_REFERENCE' });
 
     expect(failed).toHaveBeenCalledWith(
@@ -429,7 +496,8 @@ describe('OpenAiReportProviderService response generation', () => {
         mappedErrorCode: 'AI_INVALID_IMAGE_REFERENCE',
         retryable: false,
         imageCount: 1,
-        invalidImageIndex: 0,
+        invalidImageAlias: 'IMAGE_5',
+        invalidReferenceIndex: 0,
       }),
     );
     expect(
@@ -513,8 +581,10 @@ describe('OpenAiReportProviderService diagnostics', () => {
       retryable: false,
       mappedErrorCode: 'AI_BAD_REQUEST',
       invalidImageAssetId: undefined,
+      invalidImageAlias: undefined,
       invalidImageIndex: undefined,
       invalidImageMimeType: undefined,
+      invalidReferenceIndex: undefined,
       imageCount: 1,
       documentCount: 1,
       referenceStrategy: 'presigned_s3',
@@ -541,23 +611,46 @@ function providerImage(assetId: string) {
   };
 }
 
-const completedReport = (imageAssetIds: string[]) => ({
+function providerImages(count: number) {
+  return Array.from({ length: count }, (_, index) =>
+    providerImage(
+      `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+    ),
+  );
+}
+
+const providerSection = (title: string, imageRefs: string[]) => ({
+  title,
+  blocks: [{ type: 'paragraph' as const, text: 'Observed condition.' }],
+  imageRefs,
+});
+
+const completedProviderReport = (
+  imageRefs: string[],
+  additionalSections: ReturnType<typeof providerSection>[] = [],
+) => ({
   title: 'Inspection report',
   subtitle: null,
   summary: 'Summary',
-  sections: [
-    {
-      title: 'Findings',
-      blocks: [{ type: 'paragraph' as const, text: 'Observed condition.' }],
-      imageAssetIds,
-    },
-  ],
+  sections: [providerSection('Findings', imageRefs), ...additionalSections],
   conclusion: null,
   recommendations: [],
 });
 
+const reportRequest = (
+  images: ReturnType<typeof providerImage>[],
+  documents: Array<{ assetId: string; fileId: string }> = [],
+) => ({
+  instructions: 'instructions',
+  sourceText: 'source text',
+  images,
+  documents,
+  safetyIdentifier: 'safety-id',
+  maxOutputTokens: 1_000,
+});
+
 const createGenerationFixture = (
-  outputParsed: ReturnType<typeof completedReport>,
+  outputParsed: ReturnType<typeof completedProviderReport>,
 ) => {
   const withResponse = jest.fn().mockResolvedValue({
     data: {
