@@ -16,6 +16,16 @@ import { mapOpenAiProviderError } from './openai-provider-error';
 type OpenAiOperation =
   'file_upload' | 'moderation' | 'response_generation' | 'transcription';
 
+type ModerationBatchMetadata = {
+  batchCount: number;
+  batchIndex: number;
+  imageCount: number;
+  inputType: 'image' | 'text';
+};
+
+export const OPENAI_MODERATION_MODEL = 'omni-moderation-latest';
+export const OPENAI_MODERATION_MAX_IMAGES_PER_REQUEST = 1;
+
 @Injectable()
 export class OpenAiReportProviderService implements AiProvider {
   private readonly logger = new Logger(OpenAiReportProviderService.name);
@@ -42,30 +52,88 @@ export class OpenAiReportProviderService implements AiProvider {
     imageUrls: string[],
     signal?: AbortSignal,
   ): Promise<ProviderResult<{ flagged: boolean }>> {
-    try {
-      const input: OpenAI.Moderations.ModerationMultiModalInput[] = [];
-      if (text.trim()) {
-        input.push({ type: 'text', text });
+    const trimmedText = text.trim();
+    let providerRequestId: string | undefined;
+
+    if (trimmedText) {
+      const result = await this.moderateInput(
+        [{ type: 'text', text: trimmedText }],
+        {
+          batchCount: 1,
+          batchIndex: 1,
+          imageCount: 0,
+          inputType: 'text',
+        },
+        signal,
+      );
+      providerRequestId = result.providerRequestId;
+      if (result.flagged) {
+        return { value: { flagged: true }, providerRequestId };
       }
-      input.push(
-        ...imageUrls.map((url) => ({
+    }
+
+    const batchCount = Math.ceil(
+      imageUrls.length / OPENAI_MODERATION_MAX_IMAGES_PER_REQUEST,
+    );
+    for (let batchIndex = 0; batchIndex < batchCount; batchIndex += 1) {
+      const batch = imageUrls.slice(
+        batchIndex * OPENAI_MODERATION_MAX_IMAGES_PER_REQUEST,
+        (batchIndex + 1) * OPENAI_MODERATION_MAX_IMAGES_PER_REQUEST,
+      );
+      const result = await this.moderateInput(
+        batch.map((url) => ({
           type: 'image_url' as const,
           image_url: { url },
         })),
+        {
+          batchCount,
+          batchIndex: batchIndex + 1,
+          imageCount: batch.length,
+          inputType: 'image',
+        },
+        signal,
       );
-      if (input.length === 0) {
-        return { value: { flagged: false } };
+      providerRequestId = result.providerRequestId ?? providerRequestId;
+      if (result.flagged) {
+        return { value: { flagged: true }, providerRequestId };
       }
-      this.logStarted('moderation', 'omni-moderation-latest');
+    }
+
+    return { value: { flagged: false }, providerRequestId };
+  }
+
+  private async moderateInput(
+    input: OpenAI.Moderations.ModerationMultiModalInput[],
+    metadata: ModerationBatchMetadata,
+    signal?: AbortSignal,
+  ): Promise<{ flagged: boolean; providerRequestId?: string }> {
+    this.logger.log({
+      event: 'openai_moderation_batch_started',
+      operation: 'moderation',
+      model: OPENAI_MODERATION_MODEL,
+      ...metadata,
+    });
+    try {
       const { data, request_id } = await this.openAi.client.moderations
-        .create({ model: 'omni-moderation-latest', input }, { signal })
+        .create({ model: OPENAI_MODERATION_MODEL, input }, { signal })
         .withResponse();
-      return {
-        value: { flagged: data.results.some((result) => result.flagged) },
-        providerRequestId: request_id ?? undefined,
-      };
+      const flagged = data.results.some((result) => result.flagged);
+      this.logger.log({
+        event: 'openai_moderation_batch_completed',
+        operation: 'moderation',
+        model: OPENAI_MODERATION_MODEL,
+        providerStatus: 'completed',
+        flagged,
+        ...metadata,
+      });
+      return { flagged, providerRequestId: request_id ?? undefined };
     } catch (error: unknown) {
-      throw this.providerError(error, 'moderation', 'omni-moderation-latest');
+      throw this.providerError(
+        error,
+        'moderation',
+        OPENAI_MODERATION_MODEL,
+        metadata,
+      );
     }
   }
 
@@ -231,6 +299,7 @@ export class OpenAiReportProviderService implements AiProvider {
     error: unknown,
     operation: OpenAiOperation,
     model: string,
+    moderationBatch?: ModerationBatchMetadata,
   ): AiProviderError {
     const providerError =
       error instanceof AiProviderError ? error : mapOpenAiProviderError(error);
@@ -245,6 +314,7 @@ export class OpenAiReportProviderService implements AiProvider {
       requestId: providerError.providerRequestId,
       retryable: providerError.retryable,
       mappedErrorCode: providerError.code,
+      ...moderationBatch,
     });
     return providerError;
   }

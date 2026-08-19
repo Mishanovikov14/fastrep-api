@@ -103,6 +103,26 @@ detail. Audio is streamed rather than buffered as a 50 MiB object.
 result. Unknown fields and image IDs outside the snapshot are rejected before
 PDF creation.
 
+The FastRep product limit and the OpenAI moderation request limit are separate
+concerns. FastRep accepts up to `REPORT_MAX_IMAGES` images per report (20 by
+default). OpenAI's public Moderations API documents multimodal text/image
+inputs but does not publish a numeric per-request image cap; the provider has
+returned the permanent `too_many_images` error for multi-image requests.
+FastRep therefore moderates report text once and sends images through bounded
+provider-specific batches of `OPENAI_MODERATION_MAX_IMAGES_PER_REQUEST` (one
+image per request). Any flagged batch stops generation, and any failed batch
+fails the aggregate moderation operation; generation begins only after every
+required moderation request succeeds.
+
+One aggregate moderation operation owns one durable `MODERATION` provider
+attempt even though it can make several bounded HTTP requests. Consequently,
+`AI_MAX_PROVIDER_CALLS_PER_GENERATION` remains the retry/stale-recovery budget
+per logical moderation or report-generation operation; it is not a global raw
+HTTP request counter and does not count document uploads. With the default
+product limit, one logical moderation attempt makes at most 20 image requests
+plus one text request. SDK retries stay disabled, and the durable attempt limit
+still bounds repeated aggregate attempts after worker failures.
+
 PDFKit renders deterministic server-side pages without a browser or public
 rendering service. The repository embeds OFL-licensed Noto Sans regular/bold
 fonts for English, Ukrainian, German, French, and Spanish. Only model-selected
