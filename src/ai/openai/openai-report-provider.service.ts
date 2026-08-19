@@ -11,6 +11,17 @@ import {
 } from '../ai-provider.interface';
 import { ReportResult, reportResultSchema } from '../report-result.schema';
 import { OpenAiClientService } from './openai-client.service';
+import { mapOpenAiProviderError } from './openai-provider-error';
+
+type OpenAiOperation =
+  'file_upload' | 'moderation' | 'response_generation' | 'transcription';
+
+type ModerationBatchMetadata = {
+  batchCount: number;
+  batchIndex: number;
+  imageCount: number;
+  inputType: 'image' | 'text';
+};
 
 export const OPENAI_MODERATION_MODEL = 'omni-moderation-latest';
 export const OPENAI_MODERATION_MAX_IMAGES_PER_REQUEST = 1;
@@ -93,12 +104,7 @@ export class OpenAiReportProviderService implements AiProvider {
 
   private async moderateInput(
     input: OpenAI.Moderations.ModerationMultiModalInput[],
-    metadata: {
-      batchCount: number;
-      batchIndex: number;
-      imageCount: number;
-      inputType: 'image' | 'text';
-    },
+    metadata: ModerationBatchMetadata,
     signal?: AbortSignal,
   ): Promise<{ flagged: boolean; providerRequestId?: string }> {
     this.logger.log({
@@ -122,33 +128,13 @@ export class OpenAiReportProviderService implements AiProvider {
       });
       return { flagged, providerRequestId: request_id ?? undefined };
     } catch (error: unknown) {
-      const providerDiagnostic = this.moderationProviderDiagnostic(error);
-      this.logger.warn({
-        event: 'openai_moderation_batch_failed',
-        operation: 'moderation',
-        model: OPENAI_MODERATION_MODEL,
-        ...providerDiagnostic,
-        ...metadata,
-      });
-      throw this.providerError(error, 'AI_UNAVAILABLE');
+      throw this.providerError(
+        error,
+        'moderation',
+        OPENAI_MODERATION_MODEL,
+        metadata,
+      );
     }
-  }
-
-  private moderationProviderDiagnostic(error: unknown): {
-    providerErrorCode?: string;
-    providerStatus?: number;
-  } {
-    if (!(error instanceof OpenAI.APIError)) {
-      return {};
-    }
-    const providerErrorCode = (error as { code?: unknown }).code;
-    const providerStatus = (error as { status?: unknown }).status;
-    return {
-      providerErrorCode:
-        typeof providerErrorCode === 'string' ? providerErrorCode : undefined,
-      providerStatus:
-        typeof providerStatus === 'number' ? providerStatus : undefined,
-    };
   }
 
   async transcribe(
@@ -158,6 +144,7 @@ export class OpenAiReportProviderService implements AiProvider {
     language?: string,
     signal?: AbortSignal,
   ): Promise<ProviderResult<ProviderTranscription>> {
+    this.logStarted('transcription', this.transcriptionModel);
     try {
       const file = toStreamingFile(
         stream as AsyncIterable<Uint8Array>,
@@ -187,7 +174,7 @@ export class OpenAiReportProviderService implements AiProvider {
         providerRequestId: request_id ?? undefined,
       };
     } catch (error: unknown) {
-      throw this.providerError(error, 'TRANSCRIPTION_FAILED');
+      throw this.providerError(error, 'transcription', this.transcriptionModel);
     }
   }
 
@@ -197,6 +184,7 @@ export class OpenAiReportProviderService implements AiProvider {
     mimeType: string,
     signal?: AbortSignal,
   ): Promise<string> {
+    this.logStarted('file_upload', 'files-api');
     try {
       const file = toStreamingFile(
         stream as AsyncIterable<Uint8Array>,
@@ -216,7 +204,7 @@ export class OpenAiReportProviderService implements AiProvider {
       );
       return result.id;
     } catch (error: unknown) {
-      throw this.providerError(error, 'AI_UNAVAILABLE');
+      throw this.providerError(error, 'file_upload', 'files-api');
     }
   }
 
@@ -232,6 +220,7 @@ export class OpenAiReportProviderService implements AiProvider {
     request: ProviderReportRequest,
     signal?: AbortSignal,
   ): Promise<ProviderResult<ReportResult>> {
+    this.logStarted('response_generation', this.reportModel);
     try {
       const content: OpenAI.Responses.ResponseInputContent[] = [
         { type: 'input_text', text: request.sourceText },
@@ -267,6 +256,7 @@ export class OpenAiReportProviderService implements AiProvider {
           'AI_INCOMPLETE_RESPONSE',
           data.status === 'incomplete',
           'The AI provider returned an incomplete response',
+          request_id ?? undefined,
         );
       }
       return {
@@ -280,10 +270,7 @@ export class OpenAiReportProviderService implements AiProvider {
           : undefined,
       };
     } catch (error: unknown) {
-      if (error instanceof AiProviderError) {
-        throw error;
-      }
-      throw this.providerError(error, 'AI_UNAVAILABLE');
+      throw this.providerError(error, 'response_generation', this.reportModel);
     }
   }
 
@@ -299,51 +286,36 @@ export class OpenAiReportProviderService implements AiProvider {
     return undefined;
   }
 
-  private providerError(error: unknown, fallbackCode: string): AiProviderError {
-    if (error instanceof OpenAI.APIUserAbortError) {
-      return new AiProviderError(
-        'AI_REQUEST_ABORTED',
-        true,
-        'AI provider request was cancelled',
-      );
-    }
-    if (error instanceof OpenAI.APIConnectionTimeoutError) {
-      return new AiProviderError(
-        'AI_TIMEOUT',
-        true,
-        'AI provider request timed out',
-      );
-    }
-    if (error instanceof OpenAI.APIConnectionError) {
-      return new AiProviderError(
-        fallbackCode,
-        true,
-        'AI provider connection failed',
-      );
-    }
-    if (error instanceof OpenAI.APIError) {
-      const retryable =
-        error.status === 408 ||
-        error.status === 409 ||
-        error.status === 429 ||
-        (typeof error.status === 'number' && error.status >= 500);
-      const code =
-        error.status === 429
-          ? 'AI_RATE_LIMITED'
-          : error.status === 408
-            ? 'AI_TIMEOUT'
-            : fallbackCode;
-      return new AiProviderError(
-        code,
-        retryable,
-        'AI provider request failed',
-        error.requestID ?? undefined,
-      );
-    }
-    return new AiProviderError(
-      fallbackCode,
-      true,
-      'AI provider request failed',
-    );
+  private logStarted(operation: OpenAiOperation, model: string): void {
+    this.logger.log({
+      event: 'ai_provider_request_started',
+      provider: 'openai',
+      operation,
+      model,
+    });
+  }
+
+  private providerError(
+    error: unknown,
+    operation: OpenAiOperation,
+    model: string,
+    moderationBatch?: ModerationBatchMetadata,
+  ): AiProviderError {
+    const providerError =
+      error instanceof AiProviderError ? error : mapOpenAiProviderError(error);
+    this.logger.error({
+      event: 'ai_provider_request_failed',
+      provider: 'openai',
+      operation,
+      model,
+      httpStatus: providerError.diagnostics.httpStatus,
+      providerCode: providerError.diagnostics.providerCode,
+      providerType: providerError.diagnostics.providerType,
+      requestId: providerError.providerRequestId,
+      retryable: providerError.retryable,
+      mappedErrorCode: providerError.code,
+      ...moderationBatch,
+    });
+    return providerError;
   }
 }

@@ -65,12 +65,19 @@ export interface AiProvider {
 
 export const AI_PROVIDER = Symbol('AI_PROVIDER');
 
+export type AiProviderDiagnostics = {
+  httpStatus?: number;
+  providerCode?: string;
+  providerType?: string;
+};
+
 export class AiProviderError extends Error {
   constructor(
     public readonly code: string,
     public readonly retryable: boolean,
     message: string,
     public readonly providerRequestId?: string,
+    public readonly diagnostics: AiProviderDiagnostics = {},
   ) {
     super(message);
     this.name = 'AiProviderError';

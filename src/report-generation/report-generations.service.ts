@@ -269,19 +269,22 @@ export class ReportGenerationsService {
                 'A generation is already active',
               );
             }
-            this.assertReportUnlocked(report);
+            if (report.status === ReportStatus.QUEUED) {
+              throw conflict(
+                'GENERATION_ALREADY_ACTIVE',
+                'A generation is already active',
+              );
+            }
             if (
-              ![
-                ReportStatus.DRAFT,
-                ReportStatus.FAILED,
-                ReportStatus.READY,
-              ].includes(report.status)
+              report.status !== ReportStatus.DRAFT &&
+              report.status !== ReportStatus.FAILED
             ) {
               throw conflict(
                 'REPORT_NOT_EDITABLE',
                 'The report is not eligible for generation',
               );
             }
+            this.assertReportUnlocked(report);
             this.validateSources(report.notes, report.assets);
             await this.enforceStartLimits(transaction, userId);
 
@@ -320,7 +323,7 @@ export class ReportGenerationsService {
             await this.credits.reserve(transaction, userId, generationId);
             await transaction.report.update({
               where: { id: reportId },
-              data: { status: ReportStatus.PROCESSING },
+              data: { status: ReportStatus.QUEUED },
             });
             return transaction.reportGeneration.findUniqueOrThrow({
               where: { id: generationId },
@@ -517,7 +520,7 @@ export class ReportGenerationsService {
       await transaction.report.updateMany({
         where: {
           id: generation.reportId,
-          status: ReportStatus.PROCESSING,
+          status: ReportStatus.QUEUED,
         },
         data: { status: generation.priorReportStatus },
       });
