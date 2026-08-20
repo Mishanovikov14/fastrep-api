@@ -14,6 +14,7 @@ export type PdfImage = {
 type ImageDimensions = {
   width: number;
   height: number;
+  orientation?: number;
 };
 
 type PdfDocumentWithImageDimensions = PDFKit.PDFDocument & {
@@ -34,9 +35,51 @@ const PAGE_MARGIN_BOTTOM = 66;
 const FOOTER_Y_OFFSET = 38;
 const GALLERY_GAP = 12;
 const SINGLE_IMAGE_MAX_WIDTH = 360;
-const SINGLE_IMAGE_MAX_HEIGHT = 160;
-const GRID_IMAGE_MAX_HEIGHT = 150;
+const SINGLE_IMAGE_MAX_HEIGHT = 300;
+const GRID_IMAGE_MAX_HEIGHT = 210;
+const MIN_TWO_COLUMN_IMAGE_WIDTH = 84;
 const CLOSING_SECTIONS_MIN_HEIGHT = 175;
+
+type DedicatedSectionKind = 'conclusion' | 'recommendations' | 'summary';
+
+const DEDICATED_SECTION_TITLES: Record<
+  DedicatedSectionKind,
+  ReadonlySet<string>
+> = {
+  conclusion: new Set([
+    'conclusion',
+    'conclusions',
+    'висновок',
+    'висновки',
+    'fazit',
+    'schlussfolgerung',
+    'schlussfolgerungen',
+    'conclusión',
+    'conclusiones',
+  ]),
+  recommendations: new Set([
+    'recommendation',
+    'recommendations',
+    'рекомендація',
+    'рекомендації',
+    'empfehlung',
+    'empfehlungen',
+    'recommandation',
+    'recommandations',
+    'recomendación',
+    'recomendaciones',
+  ]),
+  summary: new Set([
+    'summary',
+    'executive summary',
+    'резюме',
+    'підсумок',
+    'zusammenfassung',
+    'résumé',
+    'resumen',
+    'resumen ejecutivo',
+  ]),
+};
 
 const COLORS = {
   accent: '#176B73',
@@ -116,6 +159,36 @@ export const fitImageDimensions = (
     width: sourceWidth * scale,
     height: sourceHeight * scale,
   };
+};
+
+export const orientedImageDimensions = (
+  source: ImageDimensions,
+): ImageDimensions =>
+  source.orientation !== undefined && source.orientation > 4
+    ? { width: source.height, height: source.width }
+    : { width: source.width, height: source.height };
+
+export const dedicatedSectionKind = (
+  title: string,
+): DedicatedSectionKind | undefined => {
+  const normalizedTitle = title
+    .normalize('NFKC')
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+
+  if (DEDICATED_SECTION_TITLES.summary.has(normalizedTitle)) {
+    return 'summary';
+  }
+  if (DEDICATED_SECTION_TITLES.conclusion.has(normalizedTitle)) {
+    return 'conclusion';
+  }
+  if (DEDICATED_SECTION_TITLES.recommendations.has(normalizedTitle)) {
+    return 'recommendations';
+  }
+
+  return undefined;
 };
 
 export const galleryColumnCount = (imageCount: number): 1 | 2 =>
@@ -279,6 +352,15 @@ export class PdfReportService {
     );
 
     for (const section of result.sections) {
+      const dedicatedKind = dedicatedSectionKind(section.title);
+      if (
+        dedicatedKind === 'summary' ||
+        (dedicatedKind === 'conclusion' && result.conclusion) ||
+        (dedicatedKind === 'recommendations' &&
+          result.recommendations.length > 0)
+      ) {
+        continue;
+      }
       const firstBlockText =
         section.blocks[0].type === 'paragraph'
           ? section.blocks[0].text
@@ -459,27 +541,49 @@ export class PdfReportService {
     if (images.length === 0) {
       return;
     }
-    const columns = galleryColumnCount(images.length);
     const contentWidth = this.contentWidth(document);
+    const openedImages = images.map((image) => {
+      const buffer = Buffer.from(image.bytes);
+      const source = (document as PdfDocumentWithImageDimensions).openImage(
+        buffer,
+      );
+      return {
+        buffer,
+        source: orientedImageDimensions(source),
+      };
+    });
+    const twoColumnCellWidth = (contentWidth - GALLERY_GAP) / 2;
+    const twoColumnImages = openedImages.map((image) => ({
+      ...image,
+      dimensions: fitImageDimensions(
+        image.source.width,
+        image.source.height,
+        twoColumnCellWidth,
+        GRID_IMAGE_MAX_HEIGHT,
+      ),
+    }));
+    const columns =
+      images.length === 2 &&
+      twoColumnImages.some(
+        (image) => image.dimensions.width < MIN_TWO_COLUMN_IMAGE_WIDTH,
+      )
+        ? 1
+        : galleryColumnCount(images.length);
     const cellWidth =
       columns === 1
         ? Math.min(contentWidth, SINGLE_IMAGE_MAX_WIDTH)
-        : (contentWidth - GALLERY_GAP) / 2;
+        : twoColumnCellWidth;
     const maximumHeight =
       columns === 1 ? SINGLE_IMAGE_MAX_HEIGHT : GRID_IMAGE_MAX_HEIGHT;
     document.moveDown(0.9);
 
-    for (let index = 0; index < images.length; index += columns) {
-      const row = images.slice(index, index + columns).map((image) => {
-        const buffer = Buffer.from(image.bytes);
-        const source = (document as PdfDocumentWithImageDimensions).openImage(
-          buffer,
-        );
+    for (let index = 0; index < openedImages.length; index += columns) {
+      const row = openedImages.slice(index, index + columns).map((image) => {
         return {
-          buffer,
+          buffer: image.buffer,
           dimensions: fitImageDimensions(
-            source.width,
-            source.height,
+            image.source.width,
+            image.source.height,
             cellWidth,
             maximumHeight,
           ),
@@ -490,7 +594,9 @@ export class PdfReportService {
       );
       this.ensureSpace(document, rowHeight + GALLERY_GAP);
       const rowTop = document.y;
-      const rowWidth = columns * cellWidth + (columns - 1) * GALLERY_GAP;
+      const occupiedColumns = row.length;
+      const rowWidth =
+        occupiedColumns * cellWidth + (occupiedColumns - 1) * GALLERY_GAP;
       const rowLeft = PAGE_MARGIN_X + (contentWidth - rowWidth) / 2;
 
       row.forEach((image, columnIndex) => {

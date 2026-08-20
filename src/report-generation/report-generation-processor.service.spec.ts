@@ -30,6 +30,9 @@ describe('ReportGenerationProcessorService', () => {
       'Do not repeat the same fact across sections',
     );
     expect(REPORT_INSTRUCTIONS).toContain(
+      'Never add a generic section whose title is equivalent to Summary, Conclusion, or Recommendations',
+    );
+    expect(REPORT_INSTRUCTIONS).toContain(
       'attached PDF", "attached document", "photograph", or "audio recording',
     );
   });
