@@ -237,7 +237,11 @@ export class ReportGenerationsService {
                 reportFailureWindowStartedAt: true,
                 reportConsecutiveFailureCount: true,
                 user: {
-                  select: { language: true, emailVerifiedAt: true },
+                  select: {
+                    language: true,
+                    timezone: true,
+                    emailVerifiedAt: true,
+                  },
                 },
                 assets: {
                   orderBy: { position: 'asc' },
@@ -295,6 +299,7 @@ export class ReportGenerationsService {
                 title: report.title,
                 notes: report.notes,
                 language: report.user.language,
+                timezone: report.user.timezone,
               },
               assets: report.assets
                 .filter((asset) => asset.status === ReportAssetStatus.READY)

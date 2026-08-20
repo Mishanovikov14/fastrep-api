@@ -30,6 +30,7 @@ import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { ResendRegistrationCodeDto } from './dto/resend-registration-code.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 import { VerifyRegistrationDto } from './dto/verify-registration.dto';
 
 const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
@@ -728,6 +729,10 @@ export class AuthService {
 
   getMe(userId: string): Promise<PublicUser> {
     return this.getUser(userId);
+  }
+
+  updateMe(userId: string, dto: UpdateProfileDto): Promise<PublicUser> {
+    return this.usersService.update(userId, dto);
   }
 
   private async createTokenPair(userId: string): Promise<TokenPair> {

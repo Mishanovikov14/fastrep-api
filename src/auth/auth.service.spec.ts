@@ -87,6 +87,7 @@ const toPublicUser = (user: User): PublicUser => {
     fullName: user.fullName,
     email: user.email,
     language: user.language,
+    timezone: user.timezone,
     photoUrl: user.photoUrl,
     isPremium: user.isPremium,
     createdAt: user.createdAt,
@@ -97,7 +98,7 @@ const toPublicUser = (user: User): PublicUser => {
 describe('AuthService', () => {
   let authService: AuthService;
   let usersService: jest.Mocked<
-    Pick<UsersService, 'findByEmail' | 'findById' | 'create'>
+    Pick<UsersService, 'findByEmail' | 'findById' | 'create' | 'update'>
   >;
   let refreshTokens: Map<string, RefreshToken>;
   let passwordResetRequests: Map<string, PasswordResetRequestRecord>;
@@ -121,6 +122,7 @@ describe('AuthService', () => {
       email: 'user@example.com',
       passwordHash: await argon2.hash(PASSWORD),
       language: 'en',
+      timezone: null,
       photoUrl: null,
       isPremium: false,
       emailVerifiedAt: new Date(),
@@ -143,6 +145,7 @@ describe('AuthService', () => {
       findByEmail: jest.fn(),
       findById: jest.fn(),
       create: jest.fn(),
+      update: jest.fn(),
     };
 
     const refreshTokenDelegate = {
@@ -413,6 +416,7 @@ describe('AuthService', () => {
           const createdAt = new Date();
           const createdUser: User = {
             ...data,
+            timezone: null,
             photoUrl: null,
             isPremium: false,
             createdAt,
@@ -424,6 +428,7 @@ describe('AuthService', () => {
             fullName: createdUser.fullName,
             email: createdUser.email,
             language: createdUser.language,
+            timezone: createdUser.timezone,
             photoUrl: createdUser.photoUrl,
             isPremium: createdUser.isPremium,
             createdAt: createdUser.createdAt,
@@ -1011,6 +1016,18 @@ describe('AuthService', () => {
     await expect(authService.getMe(user.id)).rejects.toBeInstanceOf(
       UnauthorizedException,
     );
+  });
+
+  it('updates the current user timezone through the profile flow', async () => {
+    const updatedUser = { ...publicUser, timezone: 'America/New_York' };
+    usersService.update.mockResolvedValue(updatedUser);
+
+    await expect(
+      authService.updateMe(user.id, { timezone: 'America/New_York' }),
+    ).resolves.toEqual(updatedUser);
+    expect(usersService.update).toHaveBeenCalledWith(user.id, {
+      timezone: 'America/New_York',
+    });
   });
 
   it('creates a reset request for an existing normalized email without storing the plaintext code', async () => {

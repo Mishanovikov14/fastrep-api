@@ -21,6 +21,7 @@ export type GenerationInputSnapshot = {
     title: string;
     notes: string | null;
     language: string;
+    timezone?: string | null;
   };
   assets: GenerationSnapshotAsset[];
   createdAt: string;
