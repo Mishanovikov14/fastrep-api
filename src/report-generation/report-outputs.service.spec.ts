@@ -19,6 +19,15 @@ describe('ReportOutputsService', () => {
     );
   });
 
+  it('preserves Unicode letters in a sanitized download filename', () => {
+    expect(
+      reportDownloadFileName(
+        'Огляд даху / літо',
+        new Date('2026-08-19T19:32:16.876Z'),
+      ),
+    ).toBe('Огляд_даху_літо_2026-08-19.pdf');
+  });
+
   it('uses the report title and output date for the download filename', async () => {
     const createdAt = new Date('2026-08-19T19:32:16.876Z');
     const prisma = {
@@ -29,17 +38,18 @@ describe('ReportOutputsService', () => {
         }),
       },
     } as unknown as PrismaService;
+    const createPresignedDownload = jest.fn().mockResolvedValue({
+      url: 'https://download.example',
+      expiresAt: createdAt,
+    });
     const storage = {
-      createPresignedDownload: jest.fn().mockResolvedValue({
-        url: 'https://download.example',
-        expiresAt: createdAt,
-      }),
+      createPresignedDownload,
     } as unknown as ObjectStorageService;
     const service = new ReportOutputsService(prisma, storage);
 
     await service.createDownloadUrl('user-id', 'report-id');
 
-    expect(storage.createPresignedDownload).toHaveBeenCalledWith(
+    expect(createPresignedDownload).toHaveBeenCalledWith(
       'private-key',
       'Inspection_Report_2026-08-19.pdf',
     );

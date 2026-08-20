@@ -352,6 +352,7 @@ export class ReportGenerationProcessorService {
         generatedAt,
         snapshot.report.language,
         snapshot.report.title,
+        snapshot.report.timezone,
       );
       await this.assertOwnership(generationId, processingToken);
 

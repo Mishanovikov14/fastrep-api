@@ -45,77 +45,12 @@ const COLORS = {
   divider: '#D8E2E4',
 } as const;
 
-const MONTHS = {
-  en: [
-    'January',
-    'February',
-    'March',
-    'April',
-    'May',
-    'June',
-    'July',
-    'August',
-    'September',
-    'October',
-    'November',
-    'December',
-  ],
-  uk: [
-    'січня',
-    'лютого',
-    'березня',
-    'квітня',
-    'травня',
-    'червня',
-    'липня',
-    'серпня',
-    'вересня',
-    'жовтня',
-    'листопада',
-    'грудня',
-  ],
-  de: [
-    'Januar',
-    'Februar',
-    'März',
-    'April',
-    'Mai',
-    'Juni',
-    'Juli',
-    'August',
-    'September',
-    'Oktober',
-    'November',
-    'Dezember',
-  ],
-  fr: [
-    'janvier',
-    'février',
-    'mars',
-    'avril',
-    'mai',
-    'juin',
-    'juillet',
-    'août',
-    'septembre',
-    'octobre',
-    'novembre',
-    'décembre',
-  ],
-  es: [
-    'enero',
-    'febrero',
-    'marzo',
-    'abril',
-    'mayo',
-    'junio',
-    'julio',
-    'agosto',
-    'septiembre',
-    'octubre',
-    'noviembre',
-    'diciembre',
-  ],
+const DATE_LOCALES = {
+  en: 'en-GB',
+  uk: 'uk-UA',
+  de: 'de-DE',
+  fr: 'fr-FR',
+  es: 'es-ES',
 } as const;
 
 export const fontPathCandidates = (
@@ -128,15 +63,42 @@ export const fontPathCandidates = (
   join(runtimeDirectory, '../../../assets/fonts', fileName),
 ];
 
-export const formatReportDate = (date: Date, language: string): string => {
-  const normalizedLanguage = language in MONTHS ? language : 'en';
-  const months = MONTHS[normalizedLanguage as keyof typeof MONTHS];
-  const day = date.getUTCDate();
-  const month = months[date.getUTCMonth()];
-  const year = date.getUTCFullYear();
-  const hours = String(date.getUTCHours()).padStart(2, '0');
-  const minutes = String(date.getUTCMinutes()).padStart(2, '0');
-  return `${day} ${month} ${year}, ${hours}:${minutes}`;
+export const formatReportDate = (
+  date: Date,
+  language: string,
+  timezone?: string | null,
+): string => {
+  const locale =
+    DATE_LOCALES[language as keyof typeof DATE_LOCALES] ?? DATE_LOCALES.en;
+  let resolvedTimezone = timezone?.trim() || 'UTC';
+  let isUtcFallback = !timezone?.trim();
+  let formatted: string;
+
+  try {
+    formatted = new Intl.DateTimeFormat(locale, {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+      timeZone: resolvedTimezone,
+    }).format(date);
+  } catch {
+    resolvedTimezone = 'UTC';
+    isUtcFallback = true;
+    formatted = new Intl.DateTimeFormat(locale, {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+      timeZone: resolvedTimezone,
+    }).format(date);
+  }
+
+  return isUtcFallback ? `${formatted} UTC` : formatted;
 };
 
 export const fitImageDimensions = (
@@ -205,6 +167,7 @@ export class PdfReportService {
     generatedAt: Date,
     language = 'en',
     reportTitle = result.title,
+    timezone?: string | null,
   ): Promise<Uint8Array> {
     if (!this.regularFontPath || !this.boldFontPath) {
       throw new AiProviderError(
@@ -306,6 +269,7 @@ export class PdfReportService {
       result.subtitle ? visibleText(result.subtitle) : null,
       generatedAt,
       language,
+      timezone,
       labels,
     );
     this.renderNamedSection(
@@ -396,6 +360,7 @@ export class PdfReportService {
     description: string | null,
     generatedAt: Date,
     language: string,
+    timezone: string | null | undefined,
     labels: ReportLabels,
   ): void {
     document
@@ -422,7 +387,13 @@ export class PdfReportService {
       .font('NotoSans')
       .fontSize(9.5)
       .fillColor(COLORS.muted)
-      .text(`${labels.generated}: ${formatReportDate(generatedAt, language)}`);
+      .text(
+        `${labels.generated}: ${formatReportDate(
+          generatedAt,
+          language,
+          timezone,
+        )}`,
+      );
     document.moveDown(1.25);
     document
       .strokeColor(COLORS.divider)

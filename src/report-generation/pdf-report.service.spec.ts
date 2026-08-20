@@ -115,12 +115,26 @@ describe('PdfReportService', () => {
     expect(bytes.byteLength).toBeLessThan(52_428_800);
   });
 
-  it('formats generated dates deterministically in the report language', () => {
+  it('formats generated dates in the captured timezone and report language', () => {
+    const date = new Date('2026-08-19T19:32:16.876Z');
+    const originalTimestamp = date.toISOString();
+
+    expect(formatReportDate(date, 'uk', 'Europe/Kyiv')).toBe(
+      '19 серпня 2026 р. о 22:32',
+    );
+    expect(formatReportDate(date, 'en', 'America/New_York')).toBe(
+      '19 August 2026 at 15:32',
+    );
+    expect(date.toISOString()).toBe(originalTimestamp);
+  });
+
+  it('marks UTC explicitly when a snapshot timezone is missing or invalid', () => {
     const date = new Date('2026-08-19T19:32:16.876Z');
 
-    expect(formatReportDate(date, 'en')).toBe('19 August 2026, 19:32');
-    expect(formatReportDate(date, 'uk')).toBe('19 серпня 2026, 19:32');
-    expect(formatReportDate(date, 'unknown')).toBe('19 August 2026, 19:32');
+    expect(formatReportDate(date, 'en')).toBe('19 August 2026 at 19:32 UTC');
+    expect(formatReportDate(date, 'unknown', 'Invalid/Timezone')).toBe(
+      '19 August 2026 at 19:32 UTC',
+    );
   });
 
   it('removes provider aliases and raw image asset IDs from rendered text', async () => {
@@ -147,6 +161,7 @@ describe('PdfReportService', () => {
       new Date('2026-08-19T19:32:16.876Z'),
       'en',
       'User supplied report title',
+      'UTC',
     );
 
     const renderedText = textSpy.mock.calls
@@ -154,7 +169,7 @@ describe('PdfReportService', () => {
       .filter((value): value is string => typeof value === 'string')
       .join('\n');
     expect(renderedText).toContain('User supplied report title');
-    expect(renderedText).toContain('19 August 2026, 19:32');
+    expect(renderedText).toContain('19 August 2026 at 19:32');
     expect(renderedText).not.toContain('IMAGE_1');
     expect(renderedText).not.toContain(assetId);
     expect(renderedText).not.toContain('2026-08-19T19:32:16.876Z');

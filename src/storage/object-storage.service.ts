@@ -19,6 +19,21 @@ import {
 } from './storage.types';
 
 const INSPECTION_RANGE_BYTES = 262_144;
+const UNSAFE_CONTENT_DISPOSITION_CHARACTERS = new Set(['"', '\\', '/', ';']);
+
+export const sanitizeContentDispositionFileName = (
+  fileName: string,
+): string => {
+  return Array.from(fileName.normalize('NFKC'), (character) => {
+    const codePoint = character.codePointAt(0);
+    const isControlCharacter =
+      codePoint !== undefined && (codePoint <= 0x1f || codePoint === 0x7f);
+    return isControlCharacter ||
+      UNSAFE_CONTENT_DISPOSITION_CHARACTERS.has(character)
+      ? '_'
+      : character;
+  }).join('');
+};
 
 @Injectable()
 export class ObjectStorageService {
@@ -210,9 +225,7 @@ export class ObjectStorageService {
   ): Promise<PresignedDownloadContract> {
     this.ensureConfigured();
     const expiresAt = new Date(Date.now() + this.downloadUrlTtlSeconds * 1000);
-    const safeFileName = fileName
-      .normalize('NFKC')
-      .replace(/[\u0000-\u001f\u007f"\\/;]+/g, '_');
+    const safeFileName = sanitizeContentDispositionFileName(fileName);
     const asciiFallback = safeFileName
       .normalize('NFKD')
       .replace(/[\u0300-\u036f]/g, '')

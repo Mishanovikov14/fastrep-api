@@ -464,6 +464,7 @@ describe('ReportGenerationProcessorService', () => {
             title: 'Inspection',
             notes: 'Existing notes',
             language: 'en',
+            timezone: 'Europe/Kyiv',
           },
           assets: [],
           createdAt: '2026-07-29T12:00:00.000Z',
@@ -530,6 +531,7 @@ describe('ReportGenerationProcessorService', () => {
       expect.any(Date),
       'en',
       'Inspection',
+      'Europe/Kyiv',
     );
     expect(storage.uploadObject).toHaveBeenCalledTimes(1);
     expect(credits.consumeInTransaction).toHaveBeenCalledTimes(1);
