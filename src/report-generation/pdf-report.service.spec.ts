@@ -2,11 +2,13 @@ import { ConfigService } from '@nestjs/config';
 import PDFDocument from 'pdfkit';
 import { AiProviderError } from '../ai/ai-provider.interface';
 import {
+  dedicatedSectionKind,
   fitImageDimensions,
   fontPathCandidates,
   formatReportDate,
   galleryColumnCount,
   needsPageBreak,
+  orientedImageDimensions,
   PdfReportService,
   sanitizePdfText,
 } from './pdf-report.service';
@@ -15,6 +17,16 @@ const onePixelJpeg = Buffer.from(
   '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABBQJ//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPwF//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPwF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQAGPwJ//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPyF//9oADAMBAAIAAwAAABD/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/EB//xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/EB//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/EB//2Q==',
   'base64',
 );
+
+const expectAspectRatioPreserved = (
+  source: { width: number; height: number },
+  rendered: { width: number; height: number },
+): void => {
+  expect(rendered.width / rendered.height).toBeCloseTo(
+    source.width / source.height,
+    6,
+  );
+};
 
 describe('PdfReportService', () => {
   afterEach(() => {
@@ -243,15 +255,110 @@ describe('PdfReportService', () => {
     expect(new Set(positions.map((position) => position.y)).size).toBe(2);
   });
 
-  it('preserves aspect ratio and never upscales images', () => {
-    expect(fitImageDimensions(1200, 2400, 240, 150)).toEqual({
-      width: 75,
-      height: 150,
-    });
-    expect(fitImageDimensions(40, 20, 240, 150)).toEqual({
+  it.each([
+    ['9:16 portrait', 900, 1600],
+    ['3:4 portrait', 1200, 1600],
+    ['16:9 landscape', 1600, 900],
+    ['4:3 landscape', 1600, 1200],
+    ['square', 1200, 1200],
+  ])('preserves the source ratio for a %s image', (_, width, height) => {
+    const source = { width, height };
+    const rendered = fitImageDimensions(width, height, 240, 210);
+
+    expectAspectRatioPreserved(source, rendered);
+    expect(rendered.width).toBeLessThanOrEqual(240);
+    expect(rendered.height).toBeLessThanOrEqual(210);
+  });
+
+  it('preserves independent portrait and landscape geometry in a mixed row', () => {
+    const portrait = { width: 900, height: 1600 };
+    const landscape = { width: 1600, height: 900 };
+    const renderedPortrait = fitImageDimensions(
+      portrait.width,
+      portrait.height,
+      240,
+      210,
+    );
+    const renderedLandscape = fitImageDimensions(
+      landscape.width,
+      landscape.height,
+      240,
+      210,
+    );
+
+    expectAspectRatioPreserved(portrait, renderedPortrait);
+    expectAspectRatioPreserved(landscape, renderedLandscape);
+    expect(renderedPortrait.height).toBeGreaterThan(renderedPortrait.width);
+    expect(renderedLandscape.width).toBeGreaterThan(renderedLandscape.height);
+  });
+
+  it('never upscales small images', () => {
+    expect(fitImageDimensions(40, 20, 240, 210)).toEqual({
       width: 40,
       height: 20,
     });
+  });
+
+  it('uses EXIF-oriented dimensions for phone photographs', () => {
+    expect(
+      orientedImageDimensions({ width: 4032, height: 3024, orientation: 6 }),
+    ).toEqual({ width: 3024, height: 4032 });
+    expect(
+      orientedImageDimensions({ width: 4032, height: 3024, orientation: 1 }),
+    ).toEqual({ width: 4032, height: 3024 });
+  });
+
+  it('recognizes localized dedicated semantic section titles', () => {
+    expect(dedicatedSectionKind(' Recommendations ')).toBe('recommendations');
+    expect(dedicatedSectionKind('Рекомендації')).toBe('recommendations');
+    expect(dedicatedSectionKind('Conclusión')).toBe('conclusion');
+    expect(dedicatedSectionKind('Inspection details')).toBeUndefined();
+  });
+
+  it('skips generic sections that duplicate dedicated closing content', async () => {
+    const textSpy = jest.spyOn(PDFDocument.prototype, 'text');
+    const service = createService();
+
+    await service.generate(
+      {
+        title: 'Title',
+        subtitle: null,
+        summary: 'Dedicated summary.',
+        sections: [
+          {
+            title: 'Recommendations',
+            blocks: [{ type: 'paragraph', text: 'Duplicated recommendation.' }],
+            imageAssetIds: [],
+          },
+          {
+            title: 'Conclusion',
+            blocks: [{ type: 'paragraph', text: 'Duplicated conclusion.' }],
+            imageAssetIds: [],
+          },
+          {
+            title: 'Inspection details',
+            blocks: [{ type: 'paragraph', text: 'Unique observation.' }],
+            imageAssetIds: [],
+          },
+        ],
+        conclusion: 'Dedicated conclusion.',
+        recommendations: ['Dedicated recommendation.'],
+      },
+      [],
+      new Date('2026-08-19T19:32:16.876Z'),
+    );
+
+    const renderedText = textSpy.mock.calls
+      .map((call) => call[0])
+      .filter((value): value is string => typeof value === 'string');
+    expect(renderedText).not.toContain('Duplicated recommendation.');
+    expect(renderedText).not.toContain('Duplicated conclusion.');
+    expect(
+      renderedText.some((value) => value.includes('Dedicated recommendation.')),
+    ).toBe(true);
+    expect(renderedText).toContain('Dedicated conclusion.');
+    expect(renderedText).toContain('Inspection details');
+    expect(renderedText).toContain('Unique observation.');
   });
 
   it('starts a new page when a heading and initial content would be orphaned', () => {

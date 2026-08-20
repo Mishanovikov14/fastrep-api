@@ -41,7 +41,8 @@ Clearly distinguish facts and direct observations from inferences and recommenda
 Use natural source terminology such as "attached PDF", "attached document", "photograph", or "audio recording" according to the actual source type.
 Use image aliases only in imageAssetIds. Never include IMAGE_N aliases, asset IDs, report IDs, generation IDs, storage keys, or URLs in titles, prose, bullets, captions, conclusions, or recommendations.
 Write natural customer-facing prose without technical image numbering.
-Adapt the structure to the useful available content. Prefer an executive summary, detailed findings or source details, recommendations, and limitations when those sections contain meaningful information; omit empty or unsupported sections.
+Use the dedicated summary, conclusion, and recommendations fields only for those semantic sections. Never add a generic section whose title is equivalent to Summary, Conclusion, or Recommendations in the requested language.
+Adapt the generic sections to the useful available content. Prefer detailed findings, observations, source details, inspection details, and limitations when those sections contain meaningful information; omit empty or unsupported sections.
 Do not repeat the same fact across sections unless necessary. Keep the executive summary high-level, place evidence and detail in findings, and keep recommendations action-oriented.
 Use neutral wording and do not depend on Markdown formatting.`;
 
