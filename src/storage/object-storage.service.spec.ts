@@ -1,5 +1,8 @@
 import { ConfigService } from '@nestjs/config';
-import { ObjectStorageService } from './object-storage.service';
+import {
+  ObjectStorageService,
+  sanitizeContentDispositionFileName,
+} from './object-storage.service';
 
 describe('ObjectStorageService', () => {
   let service: ObjectStorageService;
@@ -22,6 +25,20 @@ describe('ObjectStorageService', () => {
         client: { send: jest.Mock };
       }
     ).client.send = send;
+  });
+
+  it('preserves Unicode while sanitizing Content-Disposition delimiters', () => {
+    expect(
+      sanitizeContentDispositionFileName('Звіт; "дах"/літо\\2026.pdf'),
+    ).toBe('Звіт_ _дах__літо_2026.pdf');
+  });
+
+  it('sanitizes CR, LF, ASCII controls, and DEL deterministically', () => {
+    expect(
+      sanitizeContentDispositionFileName(
+        `report\r\n${String.fromCharCode(0, 8, 31, 127)}.pdf`,
+      ),
+    ).toBe('report______.pdf');
   });
 
   it('treats a provider not-found response as successful deletion', async () => {

@@ -5,6 +5,7 @@ export const publicUserSelect = {
   fullName: true,
   email: true,
   language: true,
+  timezone: true,
   photoUrl: true,
   isPremium: true,
   createdAt: true,

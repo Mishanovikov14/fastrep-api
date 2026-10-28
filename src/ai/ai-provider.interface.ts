@@ -4,6 +4,8 @@ import { ReportResult } from './report-result.schema';
 export type ProviderImageInput = {
   assetId: string;
   url: string;
+  mimeType: string;
+  referenceExpiresAt: Date;
 };
 
 export type ProviderDocumentInput = {
@@ -69,6 +71,11 @@ export type AiProviderDiagnostics = {
   httpStatus?: number;
   providerCode?: string;
   providerType?: string;
+  invalidImageAssetId?: string;
+  invalidImageAlias?: string;
+  invalidImageIndex?: number;
+  invalidImageMimeType?: string;
+  invalidReferenceIndex?: number;
 };
 
 export class AiProviderError extends Error {

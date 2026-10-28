@@ -16,7 +16,10 @@ export type CreateUserData = {
 };
 
 export type UpdateUserData = Partial<
-  Pick<User, 'fullName' | 'email' | 'passwordHash' | 'language' | 'photoUrl'>
+  Pick<
+    User,
+    'fullName' | 'email' | 'passwordHash' | 'language' | 'timezone' | 'photoUrl'
+  >
 >;
 
 @Injectable()

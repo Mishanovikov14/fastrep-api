@@ -1,4 +1,4 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { SupportedLanguage } from '../../../common/enums/supported-language.enum';
 
 export class PublicUserResponseDto {
@@ -25,6 +25,13 @@ export class PublicUserResponseDto {
     example: SupportedLanguage.UK,
   })
   language!: string;
+
+  @ApiPropertyOptional({
+    type: String,
+    nullable: true,
+    example: 'Europe/Kyiv',
+  })
+  timezone?: string | null;
 
   @ApiProperty({
     type: String,

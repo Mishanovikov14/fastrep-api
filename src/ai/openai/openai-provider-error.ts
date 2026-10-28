@@ -30,6 +30,11 @@ const safeProviderValue = (value: unknown): string | undefined =>
     ? value
     : undefined;
 
+const INVALID_IMAGE_REFERENCE_CODES = new Set([
+  'invalid_image',
+  'invalid_image_url',
+]);
+
 export const mapOpenAiProviderError = (error: unknown): AiProviderError => {
   if (error instanceof OpenAI.APIUserAbortError) {
     return new AiProviderError(
@@ -61,19 +66,26 @@ export const mapOpenAiProviderError = (error: unknown): AiProviderError => {
     };
     const status =
       typeof apiError.status === 'number' ? apiError.status : undefined;
+    const providerCode = safeProviderValue(apiError.code);
+    const invalidImageReference =
+      providerCode !== undefined &&
+      INVALID_IMAGE_REFERENCE_CODES.has(providerCode);
     const retryable =
-      status === 408 ||
-      status === 409 ||
-      status === 429 ||
-      (typeof status === 'number' && status >= 500);
+      !invalidImageReference &&
+      (status === 408 ||
+        status === 409 ||
+        status === 429 ||
+        (typeof status === 'number' && status >= 500));
     return new AiProviderError(
-      errorCodeForStatus(status),
+      invalidImageReference
+        ? 'AI_INVALID_IMAGE_REFERENCE'
+        : errorCodeForStatus(status),
       retryable,
       'AI provider request failed',
       safeProviderValue(apiError.requestID),
       {
         httpStatus: status,
-        providerCode: safeProviderValue(apiError.code),
+        providerCode,
         providerType: safeProviderValue(apiError.type),
       },
     );

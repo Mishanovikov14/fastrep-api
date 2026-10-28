@@ -4,6 +4,7 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Patch,
   Post,
   UseGuards,
 } from '@nestjs/common';
@@ -30,6 +31,7 @@ import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { RegisterDto } from './dto/register.dto';
 import { ResendRegistrationCodeDto } from './dto/resend-registration-code.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 import { VerifyRegistrationDto } from './dto/verify-registration.dto';
 import { AuthenticationResponseDto } from './dto/responses/authentication-response.dto';
 import { PublicUserResponseDto } from './dto/responses/public-user-response.dto';
@@ -219,7 +221,27 @@ export class AuthController {
   })
   @UseGuards(AccessTokenGuard)
   @Get('me')
-  me(@CurrentUserId() userId: string) {
+  me(@CurrentUserId() userId: string): ReturnType<AuthService['getMe']> {
     return this.authService.getMe(userId);
+  }
+
+  @ApiOperation({ summary: 'Update the current authenticated user profile' })
+  @ApiBearerAuth('access-token')
+  @ApiOkResponse({
+    description: 'Current user profile updated successfully.',
+    type: PublicUserResponseDto,
+  })
+  @ApiBadRequestResponse({ description: 'Invalid profile data.' })
+  @ApiUnauthorizedResponse({
+    description:
+      'Missing, invalid, or expired access token, or invalid session.',
+  })
+  @UseGuards(AccessTokenGuard)
+  @Patch('me')
+  updateMe(
+    @CurrentUserId() userId: string,
+    @Body() dto: UpdateProfileDto,
+  ): ReturnType<AuthService['updateMe']> {
+    return this.authService.updateMe(userId, dto);
   }
 }

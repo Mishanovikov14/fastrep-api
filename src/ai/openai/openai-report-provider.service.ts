@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI, { toStreamingFile } from 'openai';
 import { zodTextFormat } from 'openai/helpers/zod';
+import { z } from 'zod';
 import {
   AiProvider,
   AiProviderError,
@@ -23,8 +24,36 @@ type ModerationBatchMetadata = {
   inputType: 'image' | 'text';
 };
 
+type ResponseGenerationMetadata = {
+  documentCount: number;
+  imageCount: number;
+  referenceStrategy: 'none' | 'presigned_s3';
+};
+
+type ProviderImageInputWithAlias = ProviderReportRequest['images'][number] & {
+  alias: string;
+};
+
+const providerReportResultBaseSchema = reportResultSchema.omit({
+  sections: true,
+});
+const providerSectionBaseSchema =
+  reportResultSchema.shape.sections.element.omit({ imageAssetIds: true });
+type ProviderReportResult = Omit<ReportResult, 'sections'> & {
+  sections: Array<
+    Omit<ReportResult['sections'][number], 'imageAssetIds'> & {
+      imageRefs: string[];
+    }
+  >;
+};
+
 export const OPENAI_MODERATION_MODEL = 'omni-moderation-latest';
 export const OPENAI_MODERATION_MAX_IMAGES_PER_REQUEST = 1;
+const SUPPORTED_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]);
 
 @Injectable()
 export class OpenAiReportProviderService implements AiProvider {
@@ -220,15 +249,34 @@ export class OpenAiReportProviderService implements AiProvider {
     request: ProviderReportRequest,
     signal?: AbortSignal,
   ): Promise<ProviderResult<ReportResult>> {
-    this.logStarted('response_generation', this.reportModel);
+    const metadata: ResponseGenerationMetadata = {
+      documentCount: request.documents.length,
+      imageCount: request.images.length,
+      referenceStrategy: request.images.length > 0 ? 'presigned_s3' : 'none',
+    };
+    this.logStarted('response_generation', this.reportModel, metadata);
     try {
+      this.validateImageInputs(request.images);
+      const images = request.images.map((image, index) => ({
+        ...image,
+        alias: `IMAGE_${index + 1}`,
+      }));
+      const responseSchema = this.responseSchema(
+        images.map(({ alias }) => alias),
+      );
       const content: OpenAI.Responses.ResponseInputContent[] = [
         { type: 'input_text', text: request.sourceText },
-        ...request.images.map((image) => ({
-          type: 'input_image' as const,
-          detail: 'low' as const,
-          image_url: image.url,
-        })),
+        ...images.flatMap((image): OpenAI.Responses.ResponseInputContent[] => [
+          {
+            type: 'input_text',
+            text: `The next image is ${image.alias}. Use this alias in imageRefs when referencing the image.`,
+          },
+          {
+            type: 'input_image',
+            detail: 'low',
+            image_url: image.url,
+          },
+        ]),
         ...request.documents.map((document) => ({
           type: 'input_file' as const,
           file_id: document.fileId,
@@ -245,7 +293,7 @@ export class OpenAiReportProviderService implements AiProvider {
             safety_identifier: request.safetyIdentifier,
             store: false,
             text: {
-              format: zodTextFormat(reportResultSchema, 'fastrep_report_v1'),
+              format: zodTextFormat(responseSchema, 'fastrep_report_v2'),
             },
           },
           { signal },
@@ -259,8 +307,31 @@ export class OpenAiReportProviderService implements AiProvider {
           request_id ?? undefined,
         );
       }
+      const parsed = responseSchema.safeParse(data.output_parsed);
+      if (!parsed.success) {
+        throw this.invalidProviderImageReference(
+          data.output_parsed,
+          images.map(({ alias }) => alias),
+          request_id ?? undefined,
+        );
+      }
+      const value = this.mapImageAliases(
+        parsed.data,
+        images,
+        request_id ?? undefined,
+      );
+      this.logger.log({
+        event: 'ai_provider_response_mapped',
+        provider: 'openai',
+        operation: 'response_generation',
+        model: this.reportModel,
+        imageCount: images.length,
+        referencedImageCount: new Set(
+          value.sections.flatMap((section) => section.imageAssetIds),
+        ).size,
+      });
       return {
-        value: reportResultSchema.parse(data.output_parsed),
+        value,
         providerRequestId: request_id ?? undefined,
         usage: data.usage
           ? {
@@ -270,7 +341,12 @@ export class OpenAiReportProviderService implements AiProvider {
           : undefined,
       };
     } catch (error: unknown) {
-      throw this.providerError(error, 'response_generation', this.reportModel);
+      throw this.providerError(
+        error,
+        'response_generation',
+        this.reportModel,
+        metadata,
+      );
     }
   }
 
@@ -286,12 +362,150 @@ export class OpenAiReportProviderService implements AiProvider {
     return undefined;
   }
 
-  private logStarted(operation: OpenAiOperation, model: string): void {
+  private logStarted(
+    operation: OpenAiOperation,
+    model: string,
+    metadata?: ResponseGenerationMetadata,
+  ): void {
     this.logger.log({
       event: 'ai_provider_request_started',
       provider: 'openai',
       operation,
       model,
+      ...metadata,
+    });
+  }
+
+  private validateImageInputs(images: ProviderReportRequest['images']): void {
+    const invalidImageIndex = images.findIndex(
+      (image) =>
+        !SUPPORTED_IMAGE_MIME_TYPES.has(image.mimeType) ||
+        image.referenceExpiresAt.getTime() <= Date.now(),
+    );
+    if (invalidImageIndex >= 0) {
+      const unsupportedMime = !SUPPORTED_IMAGE_MIME_TYPES.has(
+        images[invalidImageIndex].mimeType,
+      );
+      throw new AiProviderError(
+        unsupportedMime
+          ? 'AI_UNSUPPORTED_IMAGE_MIME'
+          : 'AI_INVALID_IMAGE_REFERENCE',
+        false,
+        unsupportedMime
+          ? 'A report image has an unsupported format'
+          : 'A report image reference expired before provider generation',
+        undefined,
+        {
+          invalidImageAssetId: images[invalidImageIndex].assetId,
+          invalidImageIndex,
+          invalidImageMimeType: images[invalidImageIndex].mimeType,
+        },
+      );
+    }
+  }
+
+  private responseSchema(aliases: string[]): z.ZodType<ProviderReportResult> {
+    const imageRefs =
+      aliases.length > 0
+        ? z.array(z.enum(aliases as [string, ...string[]])).max(20)
+        : z.array(z.string()).max(0);
+    return providerReportResultBaseSchema.extend({
+      sections: z
+        .array(providerSectionBaseSchema.extend({ imageRefs }))
+        .min(1)
+        .max(30),
+    });
+  }
+
+  private mapImageAliases(
+    result: ProviderReportResult,
+    images: ProviderImageInputWithAlias[],
+    providerRequestId?: string,
+  ): ReportResult {
+    const assetIdByAlias = new Map(
+      images.map(({ alias, assetId }) => [alias, assetId]),
+    );
+    return reportResultSchema.parse({
+      ...result,
+      sections: result.sections.map(({ imageRefs, ...section }) => {
+        const seen = new Set<string>();
+        const imageAssetIds = imageRefs.flatMap((alias, referenceIndex) => {
+          const assetId = assetIdByAlias.get(alias);
+          if (!assetId) {
+            throw new AiProviderError(
+              'AI_INVALID_IMAGE_REFERENCE',
+              false,
+              'AI response referenced an unavailable image',
+              providerRequestId,
+              {
+                invalidImageAlias: alias,
+                invalidReferenceIndex: referenceIndex,
+              },
+            );
+          }
+          if (seen.has(assetId)) {
+            return [];
+          }
+          seen.add(assetId);
+          return [assetId];
+        });
+        return { ...section, imageAssetIds };
+      }),
+    });
+  }
+
+  private invalidProviderImageReference(
+    result: unknown,
+    aliases: string[],
+    providerRequestId?: string,
+  ): AiProviderError {
+    const allowedAliases = new Set(aliases);
+    const references = this.providerImageReferences(result);
+    const invalidReferenceIndex = references.findIndex(
+      (alias) => !allowedAliases.has(alias),
+    );
+    if (invalidReferenceIndex < 0) {
+      return new AiProviderError(
+        'AI_INVALID_RESPONSE',
+        false,
+        'AI provider response did not match the required schema',
+        providerRequestId,
+      );
+    }
+    return new AiProviderError(
+      'AI_INVALID_IMAGE_REFERENCE',
+      false,
+      'AI response referenced an unavailable image',
+      providerRequestId,
+      {
+        invalidImageAlias: references[invalidReferenceIndex],
+        invalidReferenceIndex,
+      },
+    );
+  }
+
+  private providerImageReferences(result: unknown): string[] {
+    if (!result || typeof result !== 'object' || !('sections' in result)) {
+      return [];
+    }
+    const sections = (result as { sections?: unknown }).sections;
+    if (!Array.isArray(sections)) {
+      return [];
+    }
+    return sections.flatMap((section) => {
+      if (
+        !section ||
+        typeof section !== 'object' ||
+        !('imageRefs' in section)
+      ) {
+        return [];
+      }
+      const imageRefs = (section as { imageRefs?: unknown }).imageRefs;
+      return Array.isArray(imageRefs)
+        ? imageRefs.filter(
+            (value): value is string => typeof value === 'string',
+          )
+        : [];
     });
   }
 
@@ -299,10 +513,18 @@ export class OpenAiReportProviderService implements AiProvider {
     error: unknown,
     operation: OpenAiOperation,
     model: string,
-    moderationBatch?: ModerationBatchMetadata,
+    metadata?: ModerationBatchMetadata | ResponseGenerationMetadata,
   ): AiProviderError {
     const providerError =
-      error instanceof AiProviderError ? error : mapOpenAiProviderError(error);
+      error instanceof AiProviderError
+        ? error
+        : error instanceof z.ZodError
+          ? new AiProviderError(
+              'AI_INVALID_RESPONSE',
+              false,
+              'AI provider response did not match the required schema',
+            )
+          : mapOpenAiProviderError(error);
     this.logger.error({
       event: 'ai_provider_request_failed',
       provider: 'openai',
@@ -314,7 +536,12 @@ export class OpenAiReportProviderService implements AiProvider {
       requestId: providerError.providerRequestId,
       retryable: providerError.retryable,
       mappedErrorCode: providerError.code,
-      ...moderationBatch,
+      invalidImageAssetId: providerError.diagnostics.invalidImageAssetId,
+      invalidImageAlias: providerError.diagnostics.invalidImageAlias,
+      invalidImageIndex: providerError.diagnostics.invalidImageIndex,
+      invalidImageMimeType: providerError.diagnostics.invalidImageMimeType,
+      invalidReferenceIndex: providerError.diagnostics.invalidReferenceIndex,
+      ...metadata,
     });
     return providerError;
   }

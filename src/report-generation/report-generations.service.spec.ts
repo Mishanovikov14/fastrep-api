@@ -11,7 +11,7 @@ import { CreditsService } from '../entitlements/credits.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReportGenerationQueueService } from './report-generation-queue.service';
 import { ReportGenerationsService } from './report-generations.service';
-import { PublicGeneration } from './generation.types';
+import { GenerationInputSnapshot, PublicGeneration } from './generation.types';
 
 const generation: PublicGeneration = {
   id: 'generation-id',
@@ -72,7 +72,11 @@ describe('ReportGenerationsService', () => {
         reportGenerationLockedUntil: null,
         reportFailureWindowStartedAt: null,
         reportConsecutiveFailureCount: 0,
-        user: { language: 'en', emailVerifiedAt: new Date() },
+        user: {
+          language: 'en',
+          timezone: 'Europe/Kyiv',
+          emailVerifiedAt: new Date(),
+        },
         assets: [
           {
             id: 'asset-id',
@@ -158,6 +162,11 @@ describe('ReportGenerationsService', () => {
       where: { id: 'report-id' },
       data: { status: ReportStatus.QUEUED },
     });
+    const createCall = generationDelegate.create.mock.calls[0] as
+      [{ data: { inputSnapshot: GenerationInputSnapshot } }] | undefined;
+    expect(createCall?.[0].data.inputSnapshot.report.timezone).toBe(
+      'Europe/Kyiv',
+    );
   });
 
   it('allows a new generation after report status FAILED', async () => {
@@ -414,7 +423,11 @@ describe('ReportGenerationsService', () => {
   it('requires a verified account before reserving credit', async () => {
     reportDelegate.findFirst.mockResolvedValue({
       ...(await reportDelegate.findFirst()),
-      user: { language: 'en', emailVerifiedAt: null },
+      user: {
+        language: 'en',
+        timezone: 'Europe/Kyiv',
+        emailVerifiedAt: null,
+      },
     });
 
     await expect(
@@ -491,7 +504,11 @@ describe('ReportGenerationsService', () => {
       reportGenerationLockedUntil: null,
       reportFailureWindowStartedAt: null,
       reportConsecutiveFailureCount: 0,
-      user: { language: 'en', emailVerifiedAt: new Date() },
+      user: {
+        language: 'en',
+        timezone: 'Europe/Kyiv',
+        emailVerifiedAt: new Date(),
+      },
       assets: [
         {
           id: 'asset-id',

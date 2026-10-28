@@ -62,4 +62,29 @@ describe('mapOpenAiProviderError', () => {
       mapOpenAiProviderError(new OpenAI.APIUserAbortError()),
     ).toMatchObject({ code: 'AI_REQUEST_ABORTED', retryable: false });
   });
+
+  it.each([400, 500])(
+    'maps an invalid provider image URL at HTTP %s to the stable permanent code',
+    (status) => {
+      const mapped = mapOpenAiProviderError(
+        new OpenAI.APIError(
+          status,
+          {
+            code: 'invalid_image_url',
+            message: 'private signed URL',
+            type: 'invalid_request_error',
+          },
+          'private signed URL',
+          new Headers({ 'x-request-id': 'req_image_123' }),
+        ),
+      );
+
+      expect(mapped).toMatchObject({
+        code: 'AI_INVALID_IMAGE_REFERENCE',
+        retryable: false,
+        providerRequestId: 'req_image_123',
+      });
+      expect(mapped.message).not.toContain('private');
+    },
+  );
 });

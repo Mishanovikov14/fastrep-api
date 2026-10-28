@@ -13,6 +13,22 @@ const outputSelect = {
   createdAt: true,
 } as const;
 
+export const reportDownloadFileName = (
+  reportTitle: string,
+  generatedAt: Date,
+): string => {
+  const normalizedTitle = reportTitle
+    .normalize('NFKC')
+    .replace(/[^\p{L}\p{N}]+/gu, '_')
+    .replace(/^_+|_+$/g, '');
+  const safeTitle = Array.from(normalizedTitle)
+    .slice(0, 72)
+    .join('')
+    .replace(/_+$/g, '');
+  const date = generatedAt.toISOString().slice(0, 10);
+  return `${safeTitle || 'FastRep_Report'}_${date}.pdf`;
+};
+
 @Injectable()
 export class ReportOutputsService {
   private readonly logger = new Logger(ReportOutputsService.name);
@@ -38,7 +54,7 @@ export class ReportOutputsService {
       where: { id: reportId, userId, status: ReportStatus.READY },
       select: {
         title: true,
-        output: { select: { storageKey: true } },
+        output: { select: { storageKey: true, createdAt: true } },
       },
     });
     if (!report?.output) {
@@ -47,7 +63,7 @@ export class ReportOutputsService {
     try {
       return await this.storage.createPresignedDownload(
         report.output.storageKey,
-        `${report.title}.pdf`,
+        reportDownloadFileName(report.title, report.output.createdAt),
       );
     } catch {
       this.logger.error({

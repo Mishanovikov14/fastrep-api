@@ -1,9 +1,60 @@
 import { ReportOutputType, ReportStatus } from '../../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ObjectStorageService } from '../storage/object-storage.service';
-import { ReportOutputsService } from './report-outputs.service';
+import {
+  reportDownloadFileName,
+  ReportOutputsService,
+} from './report-outputs.service';
 
 describe('ReportOutputsService', () => {
+  it('creates a sanitized human-friendly filename without a UUID', () => {
+    const fileName = reportDownloadFileName(
+      'Solar / Installation: Report?',
+      new Date('2026-08-19T19:32:16.876Z'),
+    );
+
+    expect(fileName).toBe('Solar_Installation_Report_2026-08-19.pdf');
+    expect(fileName).not.toMatch(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i,
+    );
+  });
+
+  it('preserves Unicode letters in a sanitized download filename', () => {
+    expect(
+      reportDownloadFileName(
+        'Огляд даху / літо',
+        new Date('2026-08-19T19:32:16.876Z'),
+      ),
+    ).toBe('Огляд_даху_літо_2026-08-19.pdf');
+  });
+
+  it('uses the report title and output date for the download filename', async () => {
+    const createdAt = new Date('2026-08-19T19:32:16.876Z');
+    const prisma = {
+      report: {
+        findFirst: jest.fn().mockResolvedValue({
+          title: 'Inspection Report',
+          output: { storageKey: 'private-key', createdAt },
+        }),
+      },
+    } as unknown as PrismaService;
+    const createPresignedDownload = jest.fn().mockResolvedValue({
+      url: 'https://download.example',
+      expiresAt: createdAt,
+    });
+    const storage = {
+      createPresignedDownload,
+    } as unknown as ObjectStorageService;
+    const service = new ReportOutputsService(prisma, storage);
+
+    await service.createDownloadUrl('user-id', 'report-id');
+
+    expect(createPresignedDownload).toHaveBeenCalledWith(
+      'private-key',
+      'Inspection_Report_2026-08-19.pdf',
+    );
+  });
+
   it('returns metadata without a private storage key', async () => {
     const output = {
       id: 'output-id',

@@ -32,12 +32,25 @@ import {
 import { PdfImage, PdfReportService } from './pdf-report.service';
 import { ProviderAttemptsService } from './provider-attempts.service';
 
-const REPORT_INSTRUCTIONS = `Create a professional report in the requested language using only the supplied source content.
-Never invent names, dates, quantities, events, observations, or conclusions.
-Explicitly state when relevant information is unknown.
-Clearly distinguish source observations from recommendations.
-Reference only image asset IDs supplied in the source manifest.
+export const REPORT_INSTRUCTIONS = `Create a concise, professional report in the requested language using only the supplied source content.
+Never invent names, dates, quantities, events, observations, conclusions, or relationships between sources.
+Treat every attached PDF, document, photograph, and audio recording as an independent source unless its contents provide direct evidence connecting it to another source.
+Never claim that one attachment confirms another merely because both were uploaded to the same report. If sources appear unrelated, describe them separately and state that no relationship can be established from the supplied information.
+State uncertainty and material limitations explicitly instead of guessing.
+Clearly distinguish facts and direct observations from inferences and recommendations. Never phrase an inference or recommendation as an observed fact.
+Use natural source terminology such as "attached PDF", "attached document", "photograph", or "audio recording" according to the actual source type.
+Use image aliases only in imageAssetIds. Never include IMAGE_N aliases, asset IDs, report IDs, generation IDs, storage keys, or URLs in titles, prose, bullets, captions, conclusions, or recommendations.
+Write natural customer-facing prose without technical image numbering.
+Use the dedicated summary, conclusion, and recommendations fields only for those semantic sections. Never add a generic section whose title is equivalent to Summary, Conclusion, or Recommendations in the requested language.
+Adapt the generic sections to the useful available content. Prefer detailed findings, observations, source details, inspection details, and limitations when those sections contain meaningful information; omit empty or unsupported sections.
+Do not repeat the same fact across sections unless necessary. Keep the executive summary high-level, place evidence and detail in findings, and keep recommendations action-oriented.
 Use neutral wording and do not depend on Markdown formatting.`;
+
+const SUPPORTED_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]);
 
 @Injectable()
 export class ReportGenerationProcessorService {
@@ -165,6 +178,7 @@ export class ReportGenerationProcessorService {
       const imageAssets = snapshot.assets.filter(
         (asset) => asset.type === ReportAssetType.IMAGE,
       );
+      this.assertSupportedImageMimeTypes(imageAssets);
       this.assertBeforeDeadline(deadline);
       const moderationImageInputs = await Promise.all(
         imageAssets.map(async (asset) => ({
@@ -260,11 +274,17 @@ export class ReportGenerationProcessorService {
         try {
           this.assertBeforeDeadline(deadline);
           const reportImageInputs = await Promise.all(
-            imageAssets.map(async (asset) => ({
-              assetId: asset.id,
-              url: (await this.storage.createPresignedGet(asset.storageKey))
-                .url,
-            })),
+            imageAssets.map(async (asset) => {
+              const reference = await this.storage.createPresignedGet(
+                asset.storageKey,
+              );
+              return {
+                assetId: asset.id,
+                url: reference.url,
+                mimeType: asset.verifiedMimeType,
+                referenceExpiresAt: reference.expiresAt,
+              };
+            }),
           );
           const result = await this.provider.generateReport(
             {
@@ -332,6 +352,8 @@ export class ReportGenerationProcessorService {
         pdfImages,
         generatedAt,
         snapshot.report.language,
+        snapshot.report.title,
+        snapshot.report.timezone,
       );
       await this.assertOwnership(generationId, processingToken);
 
@@ -815,18 +837,35 @@ export class ReportGenerationProcessorService {
     snapshot: GenerationInputSnapshot,
     transcripts: Array<{ assetId: string; text: string }>,
   ): string {
+    const sourceCounts = new Map<ReportAssetType, number>();
     return JSON.stringify({
       requestedLanguage: snapshot.report.language,
       title: snapshot.report.title,
       notes: snapshot.report.notes,
-      assetManifest: snapshot.assets.map((asset) => ({
-        id: asset.id,
-        type: asset.type,
-        mimeType: asset.verifiedMimeType,
-        position: asset.position,
+      assetManifest: snapshot.assets.map((asset) => {
+        const sourceNumber = (sourceCounts.get(asset.type) ?? 0) + 1;
+        sourceCounts.set(asset.type, sourceNumber);
+        return {
+          source: `${this.sourceTypeLabel(asset.type)} ${sourceNumber}`,
+          type: asset.type,
+          mimeType: asset.verifiedMimeType,
+          position: asset.position,
+        };
+      }),
+      audioTranscripts: transcripts.map((transcript, index) => ({
+        source: `audio recording ${index + 1}`,
+        text: transcript.text,
       })),
-      audioTranscripts: transcripts,
     });
+  }
+
+  private sourceTypeLabel(type: ReportAssetType): string {
+    const labels: Record<ReportAssetType, string> = {
+      [ReportAssetType.IMAGE]: 'photograph',
+      [ReportAssetType.DOCUMENT]: 'attached document',
+      [ReportAssetType.AUDIO]: 'audio recording',
+    };
+    return labels[type];
   }
 
   private validateImageReferences(
@@ -840,8 +879,29 @@ export class ReportGenerationProcessorService {
     if (invalid) {
       throw new AiProviderError(
         'AI_INVALID_IMAGE_REFERENCE',
-        true,
+        false,
         'AI response referenced an unavailable image',
+      );
+    }
+  }
+
+  private assertSupportedImageMimeTypes(
+    images: GenerationSnapshotAsset[],
+  ): void {
+    const invalidImageIndex = images.findIndex(
+      (image) => !SUPPORTED_IMAGE_MIME_TYPES.has(image.verifiedMimeType),
+    );
+    if (invalidImageIndex >= 0) {
+      throw new AiProviderError(
+        'AI_UNSUPPORTED_IMAGE_MIME',
+        false,
+        'A report image has an unsupported format',
+        undefined,
+        {
+          invalidImageAssetId: images[invalidImageIndex].id,
+          invalidImageIndex,
+          invalidImageMimeType: images[invalidImageIndex].verifiedMimeType,
+        },
       );
     }
   }
